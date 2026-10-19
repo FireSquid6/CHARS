@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "chars-algorithm": "workspace:*"
+    "chars-algorithm": "workspace:*",
+    "chars-cfbd": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "1.3.14",

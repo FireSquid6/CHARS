@@ -10,7 +10,8 @@
     "lint": "bun run --filter app lint",
     "typecheck": "bun run --filter app typegen && bun run --filter app typecheck && bun run --filter chars-algorithm typecheck && bun run --filter chars-db typecheck && bun run --filter chars-cfbd typecheck",
     "test": "bun test",
-    "db:migrate": "bun packages/chars-db/src/migrate.ts"
+    "db:migrate": "bun packages/chars-db/src/migrate.ts",
+    "data:backfill": "bun packages/chars-db/src/backfill.ts"
   },
   "trustedDependencies": ["sharp", "unrs-resolver"]
 }
