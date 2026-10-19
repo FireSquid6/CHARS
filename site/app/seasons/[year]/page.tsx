@@ -43,7 +43,8 @@ export default async function SeasonPage({ params, searchParams }: {
   const search = typeof query.q === "string" ? query.q.trim().slice(0, 100) : "";
   const eligibleOnly = query.view === "eligible";
   const status = selected?.kind === "selection_final" ? null : statusFilter(query.status);
-  const visible = filterByStatus(filterRankings(data.rankings, search, eligibleOnly), data.statuses, status);
+  const searched = filterRankings(data.rankings, search, eligibleOnly);
+  const visible = filterByStatus(searched, data.statuses, status);
   const names = new Map(data.rankings.map(team => [team.teamId, team.name]));
   const base = `/seasons/${year}`;
   return (
@@ -77,7 +78,7 @@ export default async function SeasonPage({ params, searchParams }: {
           <p>Head-to-head swaps can move teams between categories without changing their Colley rating. No single rating line describes the final field. Ties count as half a win; FCS wins count toward eligibility but not the FBS-only Colley matrix.</p>
         </section>
          {selected.kind !== "selection_final" && <StatusBubbles base={base} week={selected.key} search={search}
-           view={eligibleOnly ? "eligible" : "all"} active={status} statuses={data.statuses} total={data.rankings.length} />}
+           view={eligibleOnly ? "eligible" : "all"} active={status} statuses={data.statuses} rows={searched} />}
         {data.bracket && <Bracket bracket={data.bracket} stale={selected.publicationState === "stale"} />}
         {data.bracketIssue && <aside className="notice" role="status"><strong>Bracket unavailable</strong><p>{data.bracketIssue} Rankings and snapshot controls remain available.</p></aside>}
         <section aria-labelledby="ranking-title">

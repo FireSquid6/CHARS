@@ -9,7 +9,7 @@ import { POLL_MODEL_VERSION, SOLVER_VERSION } from "../../packages/chars-algorit
 import { getSeasonData } from "../lib/season-data";
 import { filterByStatus, statusHref } from "../lib/weekly-status";
 import SeasonPage from "../app/seasons/[year]/page";
-import { StatusBubbles } from "../app/seasons/[year]/weekly-status";
+import { StatusBubbles, TeamStatusCell } from "../app/seasons/[year]/weekly-status";
 import type { WeeklyStatuses } from "../lib/weekly-status";
 
 const original = process.env.DATABASE_PATH;
@@ -22,9 +22,11 @@ afterEach(() => {
 test("all four filters are keyboard-native links with counts, not a fifth status", () => {
   const statuses: WeeklyStatuses = Object.fromEntries(["eliminated", "needs_help", "controls_destiny", "clinched", "pending"]
     .map((label, index) => [String(index), { label: label === "pending" ? null : label,
-      state: label === "pending" ? "pending" : null, assumptions: [], pollDependent: false, path: null }])) as WeeklyStatuses;
+      state: label === "pending" ? "pending" : null, assumptions: [], pollDependent: false,
+      exception: null, paths: [] }])) as WeeklyStatuses;
+  const rows = ["0", "1", "2", "3", "4"].map(teamId => ({ teamId })) as Parameters<typeof StatusBubbles>[0]["rows"];
   const html = renderToStaticMarkup(<StatusBubbles base="/seasons/2020" week="2020:week:1" search="Al"
-    view="eligible" active={null} statuses={statuses} total={5} />);
+    view="eligible" active={null} statuses={statuses} rows={rows} />);
   for (const label of ["Eliminated", "Needs help", "Controls destiny", "Clinched"]) {
     expect(html).toContain(`Show ${label} teams (1)`);
   }
@@ -32,6 +34,29 @@ test("all four filters are keyboard-native links with counts, not a fifth status
   expect((html.match(/class="status-bubble /g) ?? [])).toHaveLength(4);
   expect(html).toContain("q=Al&amp;view=eligible&amp;status=clinched");
   expect(html).not.toContain("onclick=");
+  const subset = renderToStaticMarkup(<StatusBubbles base="/seasons/2020" week="2020:week:1" search="Al"
+    view="eligible" active="needs_help" statuses={statuses} rows={[rows[1]!, rows[4]!]} />);
+  expect(subset).toContain("Show Needs help teams (1)");
+  expect(subset).toContain("Show Clinched teams (0)");
+  expect(subset).toContain("1 unclassified team");
+  expect(subset).toContain("before the playoff-status filter");
+});
+
+test("witness ties, home/away winners and unknown IDs use honest matchup language", () => {
+  const team = { teamId: "A", name: "Alpha" } as Parameters<typeof TeamStatusCell>[0]["team"];
+  const html = renderToStaticMarkup(<TeamStatusCell team={team} names={new Map([["A", "Alpha"]])} status={{
+    label: "needs_help", state: null, exception: null, assumptions: ["all eligible poll orders"], pollDependent: false,
+    paths: [{ kind: "qualifying_win_out", outcomes: { g1: "home", g2: "away", g3: "tie", missing: "home" },
+      pollOrder: ["A"], matchups: { g1: { home: "Alpha", away: "Beta" },
+        g2: { home: "Alpha", away: "Gamma" }, g3: { home: "Beta", away: "Gamma" } } }]
+  }} />);
+  expect(html).toContain("Alpha vs Beta (g1): Alpha wins");
+  expect(html).toContain("Alpha vs Gamma (g2): Gamma wins");
+  expect(html).toContain("Beta vs Gamma (g3): tie");
+  expect(html).not.toContain("tie wins");
+  expect(html).toContain("Unknown game missing: home outcome recorded; opponents unavailable");
+  expect(html).toContain("<summary>Why needs help for Alpha?</summary>");
+  expect(html).not.toContain("Poll-dependent:");
 });
 
 test("weekly certificates require current revision, input hash, generation and solver model; filters preserve URL", async () => {
@@ -44,6 +69,10 @@ test("weekly certificates require current revision, input hash, generation and s
     db.query("INSERT INTO season_input_generations (season,generation) VALUES (2020,1)").run();
     db.query("INSERT INTO teams (id,name) VALUES ('A','Alpha'),('B','Beta'),('C','Gamma')").run();
     db.query("INSERT INTO team_seasons (season,team_id,membership) VALUES (2020,'A','fbs'),(2020,'B','fbs'),(2020,'C','fbs')").run();
+    db.query(`INSERT INTO games (id,provider_game_id,season,week,home_team_id,away_team_id,kickoff_utc,
+      status,completed,provider_season_type,application_game_type,classification_source,first_seen_utc,last_seen_utc,payload_hash)
+      VALUES ('game1','game1',2020,2,'A','B','2020-09-08T00:00:00.000Z','scheduled',0,'regular','regular','test','2020-09-01','2020-09-01','test'),
+      ('game2','game2',2020,2,'B','C','2020-09-08T00:00:00.000Z','scheduled',0,'regular','regular','test','2020-09-01','2020-09-01','test')`).run();
     db.query(`INSERT INTO snapshots (snapshot_key,revision,season,week,kind,game_cutoff_utc,input_hash,
       policy_version,model_version,calendar_policy_version,coverage_json,published_at_utc)
       VALUES ('2020:week:1',1,2020,1,'week_final','2020-09-01T00:00:00.000Z','input1','policy','model','calendar',
@@ -65,9 +94,12 @@ test("weekly certificates require current revision, input hash, generation and s
     status.run(id, "B", "eliminated", assumptions, JSON.stringify({ snapshotInputHash: "old-input" }));
     db.query(`INSERT INTO scenario_witnesses (job_id,team_id,kind,sequence,witness_json) VALUES (?, 'A','qualifying_win_out',1,?)`)
       .run(id, JSON.stringify({ kind: "qualifying_win_out", gameOutcomes: { game1: "home" }, pollOrderTeamIds: ["A", "B"] }));
+    db.query(`INSERT INTO scenario_witnesses (job_id,team_id,kind,sequence,witness_json) VALUES (?, 'A','failing_win_out',1,?)`)
+      .run(id, JSON.stringify({ kind: "failing_win_out", gameOutcomes: { game1: "home", game2: "away" }, pollOrderTeamIds: ["C", "B", "A"] }));
     const data = getSeasonData(2020, "2020:week:1");
     expect(data.statuses.A).toMatchObject({ label: "needs_help", pollDependent: true,
-      path: { outcomes: { game1: "home" }, winOut: true } });
+      paths: [{ kind: "qualifying_win_out", outcomes: { game1: "home" } },
+        { kind: "failing_win_out", outcomes: { game1: "home", game2: "away" } }] });
     expect(data.statuses.B?.label).toBeNull();
     expect(data.statuses.C?.state).toBe("pending");
     expect(filterByStatus(data.rankings, data.statuses, "needs_help").map(t => t.name)).toEqual(["Alpha"]);
@@ -78,16 +110,40 @@ test("weekly certificates require current revision, input hash, generation and s
       searchParams: Promise.resolve({ week: "2020:week:1", status: "needs_help" }) }));
     expect(html).toContain("aria-label=\"Alpha: Needs help\"");
     expect(html).toContain("Poll-dependent:");
-    expect(html).toContain("One possible path");
+    expect((html.match(/One possible path/g) ?? [])).toHaveLength(2);
+    expect(html).toContain("One possible path — qualifies");
+    expect(html).toContain("One possible path — does not qualify");
+    expect(html).toContain("Alpha vs Beta (game1): Alpha wins");
+    expect(html).toContain("Beta vs Gamma (game2): Gamma wins");
+    expect(html).toContain("Alpha → Beta");
+    expect(html).toContain("Gamma → Beta → Alpha");
     expect(html).toContain("2 unclassified teams");
+    const searched = renderToStaticMarkup(await SeasonPage({ params: Promise.resolve({ year: "2020" }),
+      searchParams: Promise.resolve({ week: "2020:week:1", q: "Alpha", status: "needs_help" }) }));
+    expect(searched).toContain("Show Needs help teams (1)");
+    expect(searched).toContain("Show Eliminated teams (0)");
+    expect(searched).toContain("0 unclassified teams");
+    const eligible = renderToStaticMarkup(await SeasonPage({ params: Promise.resolve({ year: "2020" }),
+      searchParams: Promise.resolve({ week: "2020:week:1", view: "eligible" }) }));
+    expect(eligible).toContain("Show Needs help teams (0)");
+    expect(eligible).toContain("0 unclassified teams");
     expect(html).toContain("aria-current=\"true\"");
-    expect(html).toContain("<summary>Why needs help?</summary>");
+    expect(html).toContain("<summary>Why needs help for Alpha?</summary>");
     expect(html).toContain("<nav class=\"status-bubbles\"");
     expect(html).not.toContain("tabindex=\"-1\"");
     expect(html).toContain("href=\"/seasons/2020?week=2020%3Aweek%3A1");
     db.query("UPDATE scenario_statuses SET state='unsupported',label=NULL,proof_metadata_json=? WHERE job_id=? AND team_id='B'")
       .run(JSON.stringify({ snapshotInputHash: "input1", exception: "policy/model review required" }), id);
     expect(getSeasonData(2020, "2020:week:1").statuses.B?.state).toBe("unsupported");
+    expect(getSeasonData(2020, "2020:week:1").statuses.B?.exception).toBe("policy/model review required");
+    const exceptionHtml = renderToStaticMarkup(await SeasonPage({ params: Promise.resolve({ year: "2020" }),
+      searchParams: Promise.resolve({ week: "2020:week:1" }) }));
+    expect(exceptionHtml).toContain("Policy/model exception: policy/model review required");
+    expect(exceptionHtml).toContain("Unclassified · unsupported");
+    db.query("DELETE FROM scenario_witnesses WHERE job_id=? AND team_id='A' AND kind='failing_win_out'").run(id);
+    expect(getSeasonData(2020, "2020:week:1").statuses.A?.label).toBeNull();
+    db.query(`INSERT INTO scenario_witnesses (job_id,team_id,kind,sequence,witness_json) VALUES (?,'A','failing_win_out',1,?)`)
+      .run(id, JSON.stringify({ kind: "failing_win_out", gameOutcomes: { game1: "home", game2: "away" }, pollOrderTeamIds: ["C", "B", "A"] }));
     db.query("UPDATE scenario_statuses SET state='proved',label='eliminated' WHERE job_id=? AND team_id='B'").run(id);
     db.query(`INSERT INTO snapshots (snapshot_key,revision,season,week,kind,game_cutoff_utc,input_hash,
       policy_version,model_version,calendar_policy_version,coverage_json,published_at_utc)
