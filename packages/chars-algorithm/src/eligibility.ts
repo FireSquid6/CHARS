@@ -1,6 +1,8 @@
 import type { Game, RecordStats, TeamSeason } from "./index";
 
 export interface SeasonGames {
+  /** Declared football season for every membership and game, including excluded fixtures. */
+  season: number;
   /** Season-scoped membership, including FCS opponents in the supplied snapshot. */
   teams: readonly TeamSeason[];
   /** Snapshot-scoped games: the caller must enforce its declared time cutoff. */
@@ -18,14 +20,17 @@ export interface IncludedGame {
 }
 
 export function includedRegularGames(input: SeasonGames): IncludedGame[] {
+  if (!Number.isSafeInteger(input.season) || input.season < 1) throw new Error("Invalid declared season");
   const membership = new Map<string, TeamSeason>();
   const seenGames = new Set<string>();
   for (const team of input.teams) {
+    if (team.season !== input.season) throw new Error(`Wrong-season team ${team.teamId}: expected ${input.season}`);
     if (!team.teamId || membership.has(team.teamId)) throw new Error(`Duplicate/empty team ID: ${team.teamId}`);
     membership.set(team.teamId, team);
   }
   const included: IncludedGame[] = [];
   for (const game of input.games) {
+    if (game.season !== input.season) throw new Error(`Wrong-season game ${game.id}: expected ${input.season}`);
     if (!game.id || seenGames.has(game.id)) throw new Error(`Duplicate/empty game ID: ${game.id}`);
     seenGames.add(game.id);
     if (game.homeTeamId === game.awayTeamId) throw new Error(`Identical opponents in ${game.id}`);
