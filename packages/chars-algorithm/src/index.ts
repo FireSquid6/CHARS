@@ -4,6 +4,11 @@ export const CALENDAR_POLICY_VERSION = "pre-ccg-weekend-v1" as const;
 export const POLL_MODEL_VERSION = "all-eligible-poll-orders-v1" as const;
 export const SOLVER_VERSION = "scenarios-v1" as const;
 
+export { computeColley } from "./colley";
+export type { ColleyResult, ColleyTeamRating } from "./colley";
+export { computeEligibility, includedRegularGames, recordIsEligible } from "./eligibility";
+export type { SeasonGames, IncludedGame } from "./eligibility";
+
 export type SeasonState = "preseason" | "current" | "final" | "incomplete";
 export type Membership = "fbs" | "fcs" | "other";
 export type GameType = "regular" | "ccg" | "bowl" | "playoff" | "unknown";
