@@ -1,11 +1,18 @@
 import { computeColley } from "./colley";
 import { computeEligibility, includedRegularGames, type SeasonGames } from "./eligibility";
 import { computePlayoff } from "./brackets";
+import type { SelectionInput } from "./selection";
 import { POLL_MODEL_VERSION, SOLVER_VERSION, type Game, type ScenarioProof, type ScenarioWitness, type SnapshotIdentity } from "./index";
 
 export interface ScenarioInput extends SeasonGames {
   /** Completed games are frozen; only uncompleted regular games are assigned outcomes. */
   snapshot: SnapshotIdentity;
+  /** Last instant whose results are known at the snapshot. */
+  gameCutoffUtc: string;
+  /** Games kicking off at/after this instant are outside selection. */
+  selectionFreezeUtc: string;
+  /** Caller attests the supplied schedule contains every known pre-freeze game. */
+  scheduleComplete: boolean;
   /** Historical seasons only (before the 1996 overtime rule). Defaults to false. */
   allowHistoricalTies?: boolean;
   /** Upper bound on terminal game/poll combinations. Defaults to 10,000. */
@@ -51,52 +58,101 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
   if (!Number.isSafeInteger(maxCompletions) || maxCompletions < 1 ||
     !Number.isFinite(maxRuntimeMs) || maxRuntimeMs < 0 ||
     !Number.isSafeInteger(maxTrackedPollPaths) || maxTrackedPollPaths < 1) throw new Error("Invalid scenario budget");
-  // Validate the whole snapshot (including excluded and incomplete games) with the terminal engine's validator.
-  includedRegularGames({ season, teams, games });
-  const remaining = games.filter(game => !game.completed && game.applicationGameType === "regular" &&
-    game.status !== "cancelled");
+  // Validate even excluded games. Missing opponent membership is an unresolved
+  // coverage gap, not evidence that the game can be discarded.
+  let validationGap: string | null = null;
+  try { includedRegularGames({ season, teams, games }); }
+  catch (error) {
+    if (!(error instanceof Error) || !error.message.startsWith("Unknown or wrong-season opponent in ")) throw error;
+    validationGap = error.message;
+  }
   const fbs = teams.filter(team => team.membership === "fbs").map(team => team.teamId).sort();
+  const membership = new Map(teams.map(team => [team.teamId, team.membership]));
+  const parseUtc = (value: string) => /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(value) &&
+    !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() ===
+      (value.includes(".") ? value : value.replace("Z", ".000Z")) ? Date.parse(value) : NaN;
+  const cutoff = parseUtc(input.gameCutoffUtc), freeze = parseUtc(input.selectionFreezeUtc);
+  if (!Number.isFinite(cutoff) || !Number.isFinite(freeze) || cutoff >= freeze) {
+    throw new Error("Invalid scenario game cutoff or selection freeze UTC");
+  }
+  const relevant = (game: Game) => membership.get(game.homeTeamId) === "fbs" ||
+    membership.get(game.awayTeamId) === "fbs";
+  let dataGap: string | null = validationGap ?? (input.scheduleComplete === true ? null :
+    "Complete known pre-freeze regular schedule has not been attested");
+  const includedGames: Game[] = [];
+  for (const game of games) {
+    if (!relevant(game)) continue; // FCS-FCS outcomes cannot change FBS records, ratings, or selection.
+    const kickoff = game.kickoffUtc === null ? null : parseUtc(game.kickoffUtc);
+    if (kickoff !== null && !Number.isFinite(kickoff)) {
+      dataGap ??= `Invalid kickoff timestamp for relevant game ${game.id}`;
+      continue;
+    }
+    if (kickoff !== null && kickoff >= freeze) continue;
+    if (game.status === "cancelled") continue;
+    if (game.applicationGameType === "unknown") {
+      dataGap ??= `Unresolved pre-freeze game classification: ${game.id}`;
+      continue;
+    }
+    if (game.applicationGameType !== "regular") continue;
+    if (membership.get(game.homeTeamId) === "other" || membership.get(game.awayTeamId) === "other") {
+      dataGap ??= `Unresolved opponent membership for pre-freeze game ${game.id}`;
+      continue;
+    }
+    if (game.completed && (kickoff === null || kickoff > cutoff)) {
+      dataGap ??= `Completed game ${game.id} has unknown kickoff or occurs after snapshot game cutoff`;
+      continue;
+    }
+    if (!game.completed && (kickoff === null || kickoff <= cutoff)) {
+      dataGap ??= `Unresolved future kickoff or result for pre-freeze game ${game.id}`;
+      continue;
+    }
+    includedGames.push(game);
+  }
+  const remaining = includedGames.filter(game => !game.completed);
   const assumptions = ["fixed remaining included regular-season schedule; no future cancellation or additions",
     "completed included results frozen; future CCGs, bowls and playoff games excluded",
     "all eligible poll orders; terminal eligible FBS teams only, up to 25 distinct entries",
     input.allowHistoricalTies ? "historical future ties permitted" : "future games have two decisive outcomes",
+    `game cutoff ${input.gameCutoffUtc}; selection freeze ${input.selectionFreezeUtc}; complete known schedule attested`,
     `poll model ${POLL_MODEL_VERSION}; solver ${SOLVER_VERSION}`];
   const scheduleFingerprint = JSON.stringify([season,
+    input.gameCutoffUtc, input.selectionFreezeUtc, input.scheduleComplete,
     teams.map(t => [t.teamId, t.membership]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
     games.map(g => [g.id, g.homeTeamId, g.awayTeamId, g.applicationGameType, g.status,
-      g.homeScore, g.awayScore]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))]);
+      g.kickoffUtc, g.homeScore, g.awayScore]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))]);
   const base = { snapshotKey: snapshot.key, snapshotRevision: snapshot.revision,
     pollModelVersion: POLL_MODEL_VERSION, solverVersion: SOLVER_VERSION };
   const buckets = new Map(fbs.map(teamId => [teamId, new Map<WitnessKind, ScenarioWitness>()]));
   const pollVariation = new Map<string, { qualifying?: ScenarioWitness; failing?: ScenarioWitness }>();
   const variableOutcomes: Outcome[] = input.allowHistoricalTies ? ["home", "away", "tie"] : ["home", "away"];
-  const completedRecords = computeEligibility({ season, teams, games });
-  const maximumEligible = fbs.filter(id => {
-    const record = completedRecords.get(id)!.record;
-    const future = remaining.filter(game => game.homeTeamId === id || game.awayTeamId === id).length;
-    const total = record.wins + record.losses + record.ties + future;
-    return total > 0 && 4 * (record.wins + future) + 2 * record.ties >= 3 * total;
-  }).length;
-  const largestSpace = variableOutcomes.length ** remaining.length * pollOrderCount(maximumEligible);
+  let largestSpace: number | null = null;
   let evaluatedCompletions = 0;
   let pendingReason: string | null = null;
   const pending = (reason: string): ScenarioResult => ({
     proofs: fbs.map(teamId => ({ ...base, teamId, state: "pending", label: null, assumptions,
       proofMetadata: reason, runtimeMs: Date.now() - started, witnesses: KINDS.flatMap(kind =>
         buckets.get(teamId)!.get(kind) ? [buckets.get(teamId)!.get(kind)!] : []) })),
-    assumptions, evaluatedCompletions, possibleCompletions: Number.isSafeInteger(largestSpace) ? largestSpace : null,
+    assumptions, evaluatedCompletions, possibleCompletions: largestSpace !== null &&
+      Number.isSafeInteger(largestSpace) ? largestSpace : null,
     pendingReason: reason
   });
+  if (dataGap) return pending(dataGap);
+  const completedRecords = computeEligibility({ season, teams, games: includedGames });
+  const maximumEligible = fbs.filter(id => {
+    const record = completedRecords.get(id)!.record;
+    const future = remaining.filter(game => game.homeTeamId === id || game.awayTeamId === id).length;
+    const total = record.wins + record.losses + record.ties + future;
+    return total > 0 && 4 * (record.wins + future) + 2 * record.ties >= 3 * total;
+  }).length;
+  largestSpace = variableOutcomes.length ** remaining.length * pollOrderCount(maximumEligible);
   if (!Number.isSafeInteger(largestSpace) || largestSpace > maxCompletions) {
     return pending(`Full upper bound ${largestSpace} terminal completions exceeds cap ${maxCompletions}; no classification attempted`);
   }
   const outcomes: Record<string, Outcome> = {};
-  const terminalGames: Game[] = [...games];
-  function evaluate(pollOrder: string[]): void {
-    const terminal = { season, teams, games: terminalGames };
-    const eligibility = computeEligibility(terminal);
-    const records = [...eligibility].map(([teamId, value]) => ({ teamId, record: value.record }));
-    const bracket = computePlayoff({ ...terminal, ratings: computeColley(terminal), records,
+  const terminalGames: Game[] = [...includedGames];
+  function evaluate(pollOrder: string[], terminal: SeasonGames,
+    ratings: ReturnType<typeof computeColley>, records: SelectionInput["records"]): void {
+    const bracket = computePlayoff({ ...terminal, ratings, records,
       pollEntries: pollOrder.map((teamId, index) => ({ teamId, rank: index + 1 })) }, snapshot);
     const qualified = new Set([...bracket.seeding.selection.bid, ...bracket.seeding.selection.playin]);
     evaluatedCompletions++;
@@ -125,19 +181,20 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
     }
   }
   function polls(eligible: string[], automatic: Set<string>, chosen: string[], offset: number,
-    count: number): void {
+    count: number, terminal: SeasonGames, ratings: ReturnType<typeof computeColley>,
+    records: SelectionInput["records"]): void {
     if (pendingReason) return;
     const candidates = eligible.filter(id => !automatic.has(id));
     if (chosen.length === count) {
       if (Date.now() - started >= maxRuntimeMs) { pendingReason = "Scenario runtime budget exhausted"; return; }
       const selected = new Set(chosen);
       const order = [...chosen, ...eligible.filter(id => !selected.has(id))].slice(0, 25);
-      evaluate(order);
+      evaluate(order, terminal, ratings, records);
       return;
     }
     for (let i = offset; i <= candidates.length - (count - chosen.length); i++) {
       chosen.push(candidates[i]!);
-      polls(eligible, automatic, chosen, i + 1, count);
+      polls(eligible, automatic, chosen, i + 1, count, terminal, ratings, records);
       chosen.pop();
       if (pendingReason) return;
     }
@@ -147,19 +204,21 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
     if (Date.now() - started >= maxRuntimeMs) { pendingReason = "Scenario runtime budget exhausted"; return; }
     if (index === remaining.length) {
       const terminal = { season, teams, games: terminalGames };
-      const eligible = [...computeEligibility(terminal)].filter(([, entry]) => entry.eligible).map(([id]) => id).sort();
+      const records = computeEligibility(terminal);
+      const eligible = [...records].filter(([, entry]) => entry.eligible).map(([id]) => id).sort();
       const ratings = computeColley(terminal);
-      const records = [...computeEligibility(terminal)].map(([teamId, value]) => ({ teamId, record: value.record }));
-      const automatic = computePlayoff({ ...terminal, ratings, records, pollEntries: [] }, snapshot)
+      const recordList = [...records].map(([teamId, value]) => ({ teamId, record: value.record }));
+      const automatic = computePlayoff({ ...terminal, ratings, records: recordList, pollEntries: [] }, snapshot)
         .seeding.selection;
       const selected = new Set([...automatic.initialBid, ...automatic.initialPlayin]);
-      polls(eligible, selected, [], 0, Math.min(Math.max(0, 12 - selected.size), eligible.length - selected.size));
+      polls(eligible, selected, [], 0, Math.min(Math.max(0, 12 - selected.size), eligible.length - selected.size),
+        terminal, ratings, recordList);
       return;
     }
     const game = remaining[index]!;
     for (const outcome of variableOutcomes) {
       outcomes[game.id] = outcome;
-      terminalGames[games.indexOf(game)] = { ...game, completed: true, status: "completed",
+      terminalGames[includedGames.indexOf(game)] = { ...game, completed: true, status: "completed",
         homeScore: outcome === "away" ? 0 : 1, awayScore: outcome === "home" ? 0 : 1 };
       schedules(index + 1);
       if (pendingReason) return;

@@ -8,7 +8,8 @@ function fixture(ids: string[], completed: Record<string, string[]>, future: [st
     const id = `g${counter++}`;
     return { id, providerGameId: id, season, week: 1, homeTeamId: home, awayTeamId: away,
       homeScore: scheduled ? null : 1, awayScore: scheduled ? null : 0,
-      status: scheduled ? "scheduled" : "completed", completed: !scheduled, kickoffUtc: null,
+      status: scheduled ? "scheduled" : "completed", completed: !scheduled,
+      kickoffUtc: `${season}-${scheduled ? "11" : "09"}-01T12:00:00Z`,
       providerSeasonType: "regular", applicationGameType: "regular", classificationSource: "test",
       payloadHash: id, resultRevision: 1 };
   };
@@ -16,6 +17,8 @@ function fixture(ids: string[], completed: Record<string, string[]>, future: [st
     conference: null })), { season, teamId: "FCS", membership: "fcs", conference: null }],
   games: [...Object.entries(completed).flatMap(([id, opponents]) => opponents.map(opponent => game(id, opponent))),
     ...future.map(([home, away]) => game(home, away, true))],
+  gameCutoffUtc: `${season}-10-01T00:00:00Z`, selectionFreezeUtc: `${season}-12-01T00:00:00Z`,
+  scheduleComplete: true,
   snapshot: { key: "snapshot", season, revision: 1, inputHash: "hash", policyVersion: "selection-v1",
     modelVersion: "colley-fbs-only-v1", calendarPolicyVersion: "pre-ccg-weekend-v1" } };
 }
@@ -91,4 +94,66 @@ test("historical ties require an explicit pre-overtime option", () => {
   expect(() => computeScenarios({ ...modern, allowHistoricalTies: true })).toThrow(/before 1996/);
   const old = fixture(["A"], {}, [["A", "FCS"]], 1995);
   expect(computeScenarios({ ...old, allowHistoricalTies: true }).evaluatedCompletions).toBe(3);
+});
+
+test("unknown classification of a relevant pre-freeze game blocks even an apparent clinch", () => {
+  const input = fixture(["A"], { A: ["FCS"] });
+  const unknown = { ...input.games[0]!, id: "unknown", providerGameId: "unknown",
+    applicationGameType: "unknown" as const, status: "scheduled" as const, completed: false,
+    homeScore: null, awayScore: null, kickoffUtc: "2026-11-02T00:00:00Z" };
+  input.games.push(unknown);
+  const result = computeScenarios(input);
+  expect(result.pendingReason).toContain("unknown");
+  expect(result.proofs[0]?.state).toBe("pending");
+  expect(result.proofs[0]?.label).toBeNull();
+  const other = { ...unknown, id: "other", providerGameId: "other", applicationGameType: "regular" as const };
+  const changed = { ...input, teams: input.teams.map(t => t.teamId === "FCS" ?
+    { ...t, membership: "other" as const } : t), games: [input.games[0]!, other] };
+  expect(computeScenarios(changed).pendingReason).toContain("membership");
+  expect(computeScenarios({ ...input, games: [input.games[0]!,
+    { ...unknown, awayTeamId: "UNRESOLVED" }] }).pendingReason).toContain("Unknown or wrong-season opponent");
+  expect(computeScenarios({ ...input, scheduleComplete: false }).proofs[0]?.label).toBeNull();
+});
+
+test("exclude late regular games and require a known pre-freeze future kickoff", () => {
+  const input = fixture(["A"], { A: ["FCS"] }, [["A", "FCS"]]);
+  const future = input.games[1]!;
+  const late = { ...future, kickoffUtc: "2026-12-02T00:00:00Z" };
+  const result = computeScenarios({ ...input, games: [input.games[0]!, late] });
+  expect(result.proofs[0]?.label).toBe("clinched");
+  expect(result.evaluatedCompletions).toBe(1);
+  expect(computeScenarios({ ...input, games: [input.games[0]!, { ...future, kickoffUtc: null }] })
+    .pendingReason).toContain("kickoff");
+  expect(computeScenarios({ ...input, gameCutoffUtc: "2026-11-02T00:00:00Z" })
+    .proofs[0]?.state).toBe("pending");
+});
+
+test("validate then discard irrelevant FCS-FCS games before the exponential cap", () => {
+  const input = fixture(["A"], { A: ["FCS"] });
+  input.teams.push({ season: 2026, teamId: "FCS2", membership: "fcs", conference: null });
+  for (let i = 0; i < 20; i++) input.games.push({ ...input.games[0]!, id: `irrelevant-${i}`,
+    providerGameId: `irrelevant-${i}`, homeTeamId: "FCS", awayTeamId: "FCS2",
+    status: "scheduled", completed: false, homeScore: null, awayScore: null,
+    kickoffUtc: "2026-11-05T00:00:00Z" });
+  expect(computeScenarios(input).evaluatedCompletions).toBe(1);
+  input.games.push({ ...input.games.at(-1)!, id: "duplicate", providerGameId: "irrelevant-0" });
+  expect(() => computeScenarios(input)).toThrow(/Duplicate\/empty provider game ID/);
+});
+
+test("bounded exhaustive search has no constructible four-label coverage exception", () => {
+  // Every 3-team, 2-game opponent schedule on this eligible baseline is checked.
+  // No qualifying-only-outside-win-out witness exists in this family. The
+  // unsupported/null branch remains intentionally unforced and lacks a fixture;
+  // larger head-to-head/poll universes may still expose the policy exception.
+  const opponents = ["A", "B", "C", "FCS"];
+  let searched = 0;
+  for (const first of opponents) for (const second of opponents) {
+    const input = fixture(["A", "B", "C"], { A: ["FCS"], B: ["FCS"], C: ["FCS"] },
+      [["A", first], ["B", second]]);
+    if (first === "A" || second === "B") continue;
+    const result = computeScenarios(input);
+    expect(result.proofs.every(p => p.state !== "unsupported")).toBe(true);
+    searched++;
+  }
+  expect(searched).toBe(9);
 });
