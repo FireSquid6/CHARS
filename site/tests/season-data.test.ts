@@ -1,9 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { renderToStaticMarkup } from "react-dom/server";
 import { openDatabase } from "../../packages/chars-db/src/index";
 import { migrate } from "../../packages/chars-db/src/migrate";
-import { currentFootballSeason, getHomeData, getSeasonData, supportedYears } from "../lib/season-data";
+import { currentFootballSeason, filterRankings, getHomeData, getSeasonData, supportedYears } from "../lib/season-data";
+import SeasonPage from "../app/seasons/[year]/page";
 
 const previous = { path: process.env.DATABASE_PATH, key: process.env.CFBD_API_KEY };
 const dirs: string[] = [];
@@ -50,16 +52,66 @@ test("readers use published revision, allow exact historical key and disclose st
     ranking.run("2020:selection-final", 1, "A", .85);
     ranking.run("2020:selection-final", 2, "A", .99);
     ranking.run("2020:week:1", 1, "B", .5);
+    db.query(`INSERT INTO snapshot_rankings (snapshot_key,snapshot_revision,team_id,wins,losses,ties,rating,residual,precision_method,
+      colley_rank,eligible,eligibility_reason,original_route,final_category)
+      VALUES ('2020:selection-final',1,'B',8,4,0,0.7,0,'double',2,0,'below .750','outside','outside')`).run();
     expect(getSeasonData(2020).snapshot?.revision).toBe(1);
     expect(getSeasonData(2020).rankings[0]?.rating).toBe(.85);
+    const all = getSeasonData(2020).rankings;
+    expect(all.map(row => row.name)).toEqual(["Alpha", "Beta"]);
+    expect(filterRankings(all, "bet", false).map(row => row.name)).toEqual(["Beta"]);
+    expect(filterRankings(all, "bet", true)).toEqual([]);
     expect(getSeasonData(2020, "2020:week:1").rankings[0]?.name).toBe("Beta");
     expect(getSeasonData(2020, "2020:selection-final:fake").snapshot).toBeNull();
+    expect(getSeasonData(2020, "2020:selection-final:fake").options).toHaveLength(2);
+    const invalid = renderToStaticMarkup(await SeasonPage({ params: Promise.resolve({ year: "2020" }),
+      searchParams: Promise.resolve({ week: "2020:unknown" }) }));
+    expect(invalid).toContain("That snapshot key is not published");
+    expect(invalid).toContain("Choose a published snapshot");
+    expect(invalid).toContain("Latest / final");
+    const html = renderToStaticMarkup(await SeasonPage({ params: Promise.resolve({ year: "2020" }),
+      searchParams: Promise.resolve({ q: "bet" }) }));
+    expect(html).toContain("All FBS teams");
+    expect(html).toContain("Beta");
+    expect(html).toContain("scope=\"row\"");
+    expect(html).toContain("aria-disabled=\"true\"");
+    const oldest = renderToStaticMarkup(await SeasonPage({ params: Promise.resolve({ year: "2020" }),
+      searchParams: Promise.resolve({ week: "2020:week:1" }) }));
+    expect(oldest).toContain("aria-disabled=\"true\">← Older");
     db.query("UPDATE snapshot_publications SET state='pending' WHERE snapshot_key='2020:week:1'").run();
     expect(getSeasonData(2020).pending).toBe(true);
-    expect(getSeasonData(2020, "2020:week:1").snapshot).toBeNull();
+    expect(getSeasonData(2020, "2020:week:1").snapshot?.publicationState).toBe("pending");
+    expect(getSeasonData(2020).options.find(o => o.key === "2020:week:1")?.publicationState).toBe("pending");
+    const pending = renderToStaticMarkup(await SeasonPage({ params: Promise.resolve({ year: "2020" }),
+      searchParams: Promise.resolve({ week: "2020:week:1" }) }));
+    expect(pending).toContain("pending publication");
+    expect(pending).toContain("not a validated current result");
     db.query("UPDATE snapshot_publications SET state='current' WHERE snapshot_key='2020:week:1'").run();
     db.query("UPDATE snapshot_publications SET state='stale' WHERE snapshot_key='2020:selection-final'").run();
     expect(getSeasonData(2020).state).toBe("incomplete");
+    expect(getSeasonData(2020).snapshot).toMatchObject({ key: "2020:selection-final", revision: 1, publicationState: "stale" });
     expect(getSeasonData(2020, "2020:selection-final").snapshot?.publicationState).toBe("stale");
+    db.query("UPDATE snapshot_publications SET state='stale' WHERE snapshot_key='2020:week:1'").run();
+    expect(getSeasonData(2020, "2020:week:1").snapshot?.publicationState).toBe("stale");
+  } finally { db.close(); }
+});
+
+test("provider calendar and configured preseason metadata override the Chicago fallback when available", async () => {
+  const dir = mkdtempSync("/tmp/opencode/chars-calendar-site-"); dirs.push(dir);
+  process.env.DATABASE_PATH = join(dir, "data.db");
+  const db = openDatabase({ path: process.env.DATABASE_PATH });
+  try {
+    await migrate(db);
+    db.query("INSERT INTO seasons (year,state,calendar_policy_version) VALUES (2027,'preseason','test')").run();
+    db.query(`INSERT INTO season_calendar_weeks (season,season_type,week,start_utc,end_utc,source_hash)
+      VALUES (2027,'regular',0,'2027-08-25T00:00:00.000Z','2027-09-01T00:00:00.000Z','fixture')`).run();
+    const may = new Date("2027-05-20T12:00:00.000Z");
+    expect(currentFootballSeason(may)).toBe(2026);
+    expect(supportedYears(may)[0]).toBe(2027);
+    expect(getHomeData(may).seasons[0]).toMatchObject({ year: 2027, state: "preseason" });
+    db.query("UPDATE seasons SET state='incomplete' WHERE year=2027").run();
+    expect(supportedYears(may)[0]).toBe(2026);
+    db.query("UPDATE season_calendar_weeks SET start_utc='2027-06-10T00:00:00.000Z', end_utc='2027-06-17T00:00:00.000Z' WHERE season=2027").run();
+    expect(supportedYears(new Date("2027-06-12T12:00:00.000Z"))[0]).toBe(2027);
   } finally { db.close(); }
 });

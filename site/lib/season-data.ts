@@ -14,6 +14,12 @@ export type Ranking = {
   wins: number; losses: number; ties: number; rating: number; colleyRank: number; adjustedRank: number | null;
   eligible: boolean; eligibilityReason: string | null; originalRoute: string; finalCategory: "bid" | "playin" | "outside";
 };
+
+export function filterRankings(rankings: Ranking[], search: string, eligibleOnly: boolean): Ranking[] {
+  const needle = search.trim().toLocaleLowerCase();
+  return rankings.filter(team => (!eligibleOnly || team.eligible) &&
+    (!needle || `${team.name} ${team.abbreviation ?? ""}`.toLocaleLowerCase().includes(needle)));
+}
 export type Swap = { sequence: number; winner: string; loser: string; supportingGameIds: string[];
   winnerBefore: string; loserBefore: string };
 export type SeasonData = { year: number; state: SeasonState; options: SnapshotOption[]; snapshot: SnapshotOption | null;
@@ -31,9 +37,33 @@ export function currentFootballSeason(now = new Date()): number {
   return month >= 7 ? year : year - 1;
 }
 
-export function supportedYears(now = new Date(), start = Number(process.env.START_SEASON ?? 1998)): number[] {
-  if (!Number.isSafeInteger(start) || start < 1869 || start > currentFootballSeason(now)) return [];
-  return Array.from({ length: currentFootballSeason(now) - start + 1 }, (_, index) => currentFootballSeason(now) - index);
+function seasonFromCalendar(db: Database, now: Date): number {
+  const fallback = currentFootballSeason(now);
+  const iso = now.toISOString();
+  const active = db.query<{ season: number }, [number, number, string, string]>(`SELECT season FROM season_calendar_weeks
+    WHERE season BETWEEN ? AND ? AND season_type='regular' AND start_utc<=? AND end_utc>?
+    ORDER BY season DESC LIMIT 1`).get(fallback - 1, fallback + 1, iso, iso);
+  if (active) return active.season;
+  // Explicit preseason/current metadata with a near-future provider calendar can override the July convention.
+  const upcoming = db.query<{ year: number }, [number, number, string, string]>(`SELECT s.year FROM seasons s
+    JOIN season_calendar_weeks w ON w.season=s.year AND w.season_type='regular'
+    WHERE s.state IN ('preseason','current') AND s.year BETWEEN ? AND ? AND w.start_utc>? AND w.start_utc<=?
+    ORDER BY s.year DESC LIMIT 1`).get(fallback, fallback + 1, iso,
+    new Date(now.getTime() + 120 * 86400000).toISOString());
+  return upcoming?.year ?? fallback;
+}
+
+export function supportedYears(now = new Date(), start = Number(process.env.START_SEASON ?? 1998), db?: Database): number[] {
+  const connection = db ? null : openReadOnly().db;
+  try {
+    const current = seasonFromAvailableCalendar(db ?? connection, now);
+    if (!Number.isSafeInteger(start) || start < 1869 || start > current) return [];
+    return Array.from({ length: current - start + 1 }, (_, index) => current - index);
+  } finally { connection?.close(); }
+}
+
+function seasonFromAvailableCalendar(db: Database | null, now: Date): number {
+  return db ? seasonFromCalendar(db, now) : currentFootballSeason(now);
 }
 
 function openReadOnly(): { db: Database | null; issue: string | null } {
@@ -44,7 +74,9 @@ function openReadOnly(): { db: Database | null; issue: string | null } {
     const db = new Database(path, { readonly: true, strict: true });
     db.exec("PRAGMA query_only = ON");
     db.exec("PRAGMA busy_timeout = 5000");
-    if (!db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='table' AND name='snapshot_publications'").get()) {
+    const schema = db.query<{ name: string }, []>(`SELECT name FROM sqlite_master WHERE type='table'
+      AND name IN ('snapshot_publications','season_calendar_weeks','sync_runs')`).all();
+    if (schema.length !== 3) {
       db.close();
       return { db: null, issue: "Database migrations are required. Run bun run db:migrate." };
     }
@@ -58,7 +90,7 @@ function snapshotOptions(db: Database, year: number): SnapshotOption[] {
   const rows = db.query<DbSnapshot, [number]>(`SELECT s.snapshot_key, s.revision, s.week, s.kind, s.game_cutoff_utc,
     s.poll_cutoff_utc, s.published_at_utc, p.state, s.coverage_json
     FROM snapshot_publications p JOIN snapshots s ON s.snapshot_key=p.snapshot_key AND s.revision=p.revision
-    WHERE s.season=? AND (p.state='current' OR s.kind='selection_final')
+    WHERE s.season=?
     ORDER BY s.game_cutoff_utc DESC, CASE s.kind WHEN 'selection_final' THEN 0 WHEN 'week_final' THEN 1 ELSE 2 END,
     s.published_at_utc DESC`).all(year);
   return rows.map(row => {
@@ -91,12 +123,13 @@ function seasonState(year: number, options: SnapshotOption[], current: number): 
 }
 
 export function getHomeData(now = new Date()): { seasons: SeasonCard[]; setup: string | null } {
-  const years = supportedYears(now);
   const { db, issue } = openReadOnly();
+  const years = supportedYears(now, Number(process.env.START_SEASON ?? 1998), db ?? undefined);
+  const current = seasonFromAvailableCalendar(db, now);
   try {
     const cards = years.map(year => {
       const options = db ? snapshotOptions(db, year) : [];
-      const state = seasonState(year, options, currentFootballSeason(now));
+      const state = seasonState(year, options, current);
       const latest = options.find(option => option.publicationState === "current");
       return { year, state, detail: state === "final" ? "Pre-championship selection available" :
         db && hasPendingPublication(db, year) ? "Updated snapshot pending validation" :
@@ -107,7 +140,7 @@ export function getHomeData(now = new Date()): { seasons: SeasonCard[]; setup: s
     return { seasons: cards, setup: issue ?? (process.env.CFBD_API_KEY ? null :
       "CFBD_API_KEY is missing. Existing snapshots remain viewable; new seasons require a server-side API key and backfill.") };
   } catch {
-    return { seasons: years.map(year => ({ year, state: year === currentFootballSeason(now) ? "preseason" : "incomplete", detail: "Database unavailable" })),
+    return { seasons: years.map(year => ({ year, state: year === current ? "preseason" : "incomplete", detail: "Database unavailable" })),
       setup: "Unable to read published seasons. Check SQLite migrations and database access." };
   } finally { db?.close(); }
 }
@@ -123,8 +156,10 @@ export function getSeasonData(year: number, requestedWeek?: string): SeasonData 
       const options = snapshotOptions(db, year);
       const pending = hasPendingPublication(db, year);
       const final = options.find(o => o.kind === "selection_final" && o.publicationState === "current" && o.coverage.complete);
+      const retainedFinal = options.find(o => o.kind === "selection_final" && o.publicationState === "stale");
       const selected = requestedWeek !== undefined ? options.find(o => o.key === requestedWeek) :
-        final ?? options.find(o => o.publicationState === "current" && o.coverage.complete) ??
+        final ?? retainedFinal ??
+        options.find(o => o.publicationState === "current" && o.coverage.complete) ??
         options.find(o => o.publicationState === "current") ?? options.find(o => o.kind === "selection_final");
       const snapshot = selected ?? null;
       const rankings = snapshot ? db.query<Omit<Ranking, "eligible"> & { eligible: number }, [number, string, number]>(
@@ -144,7 +179,7 @@ export function getSeasonData(year: number, requestedWeek?: string): SeasonData 
           supportingGameIds: event.supportingGameIds, winnerBefore: event.winnerBefore, loserBefore: event.loserBefore };
       }) : [];
       const sync = db.query<{ ended_at_utc: string }, []>("SELECT ended_at_utc FROM sync_runs WHERE state='success' ORDER BY ended_at_utc DESC LIMIT 1").get();
-      return { year, state: seasonState(year, options, currentFootballSeason()), options, snapshot,
+      return { year, state: seasonState(year, options, seasonFromCalendar(db, new Date())), options, snapshot,
         rankings: rankings.map(row => ({ ...row, eligible: Boolean(row.eligible) })), swaps,
         issue: requestedWeek !== undefined && !selected ? "That snapshot key is not published for this season." :
           !snapshot ? "No published snapshot for this season. Backfill and rebuild snapshots before viewing rankings." : null,
