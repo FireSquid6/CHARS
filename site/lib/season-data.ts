@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
+import { bracketView, type BracketRow, type BracketView } from "./bracket-view";
 
 export type SeasonState = "preseason" | "current" | "final" | "incomplete";
 export type SeasonCard = { year: number; state: SeasonState; detail: string };
@@ -23,7 +24,7 @@ export function filterRankings(rankings: Ranking[], search: string, eligibleOnly
 export type Swap = { sequence: number; winner: string; loser: string; supportingGameIds: string[];
   winnerBefore: string; loserBefore: string };
 export type SeasonData = { year: number; state: SeasonState; options: SnapshotOption[]; snapshot: SnapshotOption | null;
-  rankings: Ranking[]; swaps: Swap[]; issue: string | null; lastSync: string | null; pending: boolean };
+  rankings: Ranking[]; swaps: Swap[]; bracket: BracketView | null; issue: string | null; lastSync: string | null; pending: boolean };
 
 type DbSnapshot = { snapshot_key: string; revision: number; week: number | null; kind: SnapshotOption["kind"];
   game_cutoff_utc: string; poll_cutoff_utc: string | null; published_at_utc: string;
@@ -148,7 +149,7 @@ export function getHomeData(now = new Date()): { seasons: SeasonCard[]; setup: s
 export function getSeasonData(year: number, requestedWeek?: string): SeasonData {
   const { db, issue } = openReadOnly();
   const empty = (message: string): SeasonData => ({ year, state: year === currentFootballSeason() ? "preseason" : "incomplete",
-    options: [], snapshot: null, rankings: [], swaps: [], issue: message, lastSync: null, pending: false });
+    options: [], snapshot: null, rankings: [], swaps: [], bracket: null, issue: message, lastSync: null, pending: false });
   if (!db) return empty(issue ?? "Database unavailable");
   try {
     // One consistent WAL read: ranking rows and the pointer always refer to the same publication.
@@ -170,17 +171,24 @@ export function getSeasonData(year: number, requestedWeek?: string): SeasonData 
          JOIN team_seasons ts ON ts.season=? AND ts.team_id=r.team_id
          WHERE r.snapshot_key=? AND r.snapshot_revision=? ORDER BY r.colley_rank, r.team_id`
       ).all(year, snapshot.key, snapshot.revision) : [];
-      const swaps = snapshot ? db.query<{ sequence: number; details_json: string }, [string, number]>(
+       const swaps = snapshot ? db.query<{ sequence: number; details_json: string }, [string, number]>(
         "SELECT sequence, details_json FROM selection_events WHERE snapshot_key=? AND snapshot_revision=? ORDER BY sequence"
       ).all(snapshot.key, snapshot.revision).map(row => {
         const event = JSON.parse(row.details_json) as { winnerTeamId: string; loserTeamId: string;
           supportingGameIds: string[]; winnerBefore: string; loserBefore: string };
         return { sequence: row.sequence, winner: event.winnerTeamId, loser: event.loserTeamId,
           supportingGameIds: event.supportingGameIds, winnerBefore: event.winnerBefore, loserBefore: event.loserBefore };
-      }) : [];
+       }) : [];
+       const bracketRows = snapshot?.kind === "selection_final" && snapshot.publicationState === "current" && snapshot.coverage.complete ?
+         db.query<BracketRow, [string, number]>(`SELECT round, position, seed, team_a_id, team_b_id,
+           source_slot_a, source_slot_b, is_bye FROM bracket_slots
+           WHERE snapshot_key=? AND snapshot_revision=? ORDER BY round, position`).all(snapshot.key, snapshot.revision) : [];
+       const bracket = snapshot?.kind === "selection_final" && snapshot.publicationState === "current" && snapshot.coverage.complete &&
+         (bracketRows.length > 0 || !rankings.some(row => row.finalCategory !== "outside")) ?
+         bracketView(bracketRows, rankings.map(row => ({ id: row.teamId, name: row.name, abbreviation: row.abbreviation, category: row.finalCategory }))) : null;
       const sync = db.query<{ ended_at_utc: string }, []>("SELECT ended_at_utc FROM sync_runs WHERE state='success' ORDER BY ended_at_utc DESC LIMIT 1").get();
       return { year, state: seasonState(year, options, seasonFromCalendar(db, new Date())), options, snapshot,
-        rankings: rankings.map(row => ({ ...row, eligible: Boolean(row.eligible) })), swaps,
+         rankings: rankings.map(row => ({ ...row, eligible: Boolean(row.eligible) })), swaps, bracket,
         issue: requestedWeek !== undefined && !selected ? "That snapshot key is not published for this season." :
           !snapshot ? "No published snapshot for this season. Backfill and rebuild snapshots before viewing rankings." : null,
         lastSync: sync?.ended_at_utc ?? null, pending };

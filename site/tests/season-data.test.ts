@@ -52,11 +52,15 @@ test("readers use published revision, allow exact historical key and disclose st
     ranking.run("2020:selection-final", 1, "A", .85);
     ranking.run("2020:selection-final", 2, "A", .99);
     ranking.run("2020:week:1", 1, "B", .5);
+    db.query(`INSERT INTO bracket_slots (snapshot_key,snapshot_revision,round,position,seed,team_a_id,is_bye)
+      VALUES ('2020:selection-final',1,0,0,1,'A',0),('2020:selection-final',2,0,0,1,'B',0)`).run();
     db.query(`INSERT INTO snapshot_rankings (snapshot_key,snapshot_revision,team_id,wins,losses,ties,rating,residual,precision_method,
       colley_rank,eligible,eligibility_reason,original_route,final_category)
       VALUES ('2020:selection-final',1,'B',8,4,0,0.7,0,'double',2,0,'below .750','outside','outside')`).run();
     expect(getSeasonData(2020).snapshot?.revision).toBe(1);
     expect(getSeasonData(2020).rankings[0]?.rating).toBe(.85);
+    expect(getSeasonData(2020).bracket?.slots).toEqual([{ seed: 1, label: "Alpha", pairId: null }]);
+    expect(getSeasonData(2020, "2020:week:1").bracket).toBeNull();
     const all = getSeasonData(2020).rankings;
     expect(all.map(row => row.name)).toEqual(["Alpha", "Beta"]);
     expect(filterRankings(all, "bet", false).map(row => row.name)).toEqual(["Beta"]);
@@ -73,6 +77,8 @@ test("readers use published revision, allow exact historical key and disclose st
       searchParams: Promise.resolve({ q: "bet" }) }));
     expect(html).toContain("All FBS teams");
     expect(html).toContain("Beta");
+    expect(html).toContain("Hypothetical playoff bracket");
+    expect(html).not.toContain("Seed 1</span> Beta");
     expect(html).toContain("scope=\"row\"");
     expect(html).toContain("aria-disabled=\"true\"");
     const oldest = renderToStaticMarkup(await SeasonPage({ params: Promise.resolve({ year: "2020" }),
