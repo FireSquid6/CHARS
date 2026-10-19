@@ -61,6 +61,34 @@ test("even winning out cannot recover a 750 record", () => {
   expect(proof(input, "A").label).toBe("eliminated");
 });
 
+test("record proof survives exponential schedules and budget zero, with provenance", () => {
+  const ids = Array.from({ length: 32 }, (_, i) => `T${i}`);
+  const input = fixture(ids, { T0: [] }, ids.slice(1).map(id => [id, "FCS"]));
+  for (let i = 0; i < 10; i++) input.games.push({ ...input.games[0]!, id: `loss-${i}`,
+    providerGameId: `loss-${i}`, homeTeamId: "FCS", awayTeamId: "T0",
+    completed: true, status: "completed", homeScore: 1, awayScore: 0,
+    kickoffUtc: "2026-09-01T12:00:00Z" });
+  const result = computeScenarios({ ...input, maxRuntimeMs: 0, maxCompletions: 1 });
+  const target = result.proofs.find(p => p.teamId === "T0")!;
+  expect(target.label).toBe("eliminated");
+  expect(JSON.parse(target.proofMetadata!).certificate).toBe("exact maximum terminal record below .750");
+  expect(result.proofs.find(p => p.teamId === "T1")?.label).toBeNull();
+  expect(computeScenarios({ ...input, scheduleComplete: false, maxRuntimeMs: 0 }).proofs
+    .find(p => p.teamId === "T0")?.label).toBeNull();
+});
+
+test("deterministic completion cursor matches one-shot exhaustive proofs", () => {
+  const input = fixture(["A", "B"], { A: ["FCS", "FCS"], B: ["FCS", "FCS"] }, [["A", "B"]]);
+  const first = computeScenarios({ ...input, maxCompletions: 1 });
+  expect(first.complete).toBe(false);
+  expect(first.proofs.every(p => p.label === null)).toBe(true);
+  const initialWitnesses = Object.fromEntries(first.proofs.map(p => [p.teamId, p.witnesses]));
+  const second = computeScenarios({ ...input, startCompletion: first.nextCompletion,
+    initialWitnesses, maxCompletions: 1 });
+  expect(second.complete).toBe(true);
+  expect(second.proofs.map(p => p.label)).toEqual(computeScenarios(input).proofs.map(p => p.label));
+});
+
 test("poll-dependent needs help quantifies over all eligible poll orders, even with no games", () => {
   const ids = Array.from({ length: 13 }, (_, i) => `T${i}`);
   const input = fixture(ids, Object.fromEntries(ids.map(id => [id, ["FCS"]])));
@@ -79,6 +107,10 @@ test("poll combinatorics and exhausted runtime remain pending, not a claimed lab
   const input = fixture(ids, Object.fromEntries(ids.map(id => [id, ["FCS"]])));
   const result = computeScenarios(input);
   expect(result.pendingReason).toContain("cap");
+  expect(result.evaluatedCompletions).toBe(0);
+  const incremental = computeScenarios({ ...input, startCompletion: 0, maxCompletions: 1 });
+  expect(incremental.evaluatedCompletions).toBe(1);
+  expect(incremental.proofs.every(p => p.label === null)).toBe(true);
   expect(result.proofs.every(p => p.state === "pending" && p.label === null)).toBe(true);
   expect(result.assumptions).toContain("all eligible poll orders; terminal eligible FBS teams only, up to 25 distinct entries");
   const timed = computeScenarios({ ...fixture(["A"], { A: ["FCS"] }), maxRuntimeMs: 0 });

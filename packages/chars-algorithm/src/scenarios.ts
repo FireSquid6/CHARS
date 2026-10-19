@@ -21,6 +21,10 @@ export interface ScenarioInput extends SeasonGames {
   maxRuntimeMs?: number;
   /** Maximum stored distinct win-out game paths across teams. Defaults to 10,000. */
   maxTrackedPollPaths?: number;
+  /** Number of deterministic poll-equivalence leaves already processed by a prior run. */
+  startCompletion?: number;
+  /** Previously persisted witnesses; never treated as proof without matching input identity. */
+  initialWitnesses?: Record<string, ScenarioWitness[]>;
 }
 
 export interface ScenarioResult {
@@ -31,6 +35,8 @@ export interface ScenarioResult {
   evaluatedCompletions: number;
   possibleCompletions: number | null;
   pendingReason: string | null;
+  nextCompletion: number;
+  complete: boolean;
 }
 
 type Outcome = "home" | "away" | "tie";
@@ -58,6 +64,8 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
   if (!Number.isSafeInteger(maxCompletions) || maxCompletions < 1 ||
     !Number.isFinite(maxRuntimeMs) || maxRuntimeMs < 0 ||
     !Number.isSafeInteger(maxTrackedPollPaths) || maxTrackedPollPaths < 1) throw new Error("Invalid scenario budget");
+  const startCompletion = input.startCompletion ?? 0;
+  if (!Number.isSafeInteger(startCompletion) || startCompletion < 0) throw new Error("Invalid scenario cursor");
   // Validate even excluded games. Missing opponent membership is an unresolved
   // coverage gap, not evidence that the game can be discarded.
   let validationGap: string | null = null;
@@ -123,31 +131,79 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
   const base = { snapshotKey: snapshot.key, snapshotRevision: snapshot.revision,
     pollModelVersion: POLL_MODEL_VERSION, solverVersion: SOLVER_VERSION };
   const buckets = new Map(fbs.map(teamId => [teamId, new Map<WitnessKind, ScenarioWitness>()]));
+  for (const [teamId, witnesses] of Object.entries(input.initialWitnesses ?? {})) {
+    const bucket = buckets.get(teamId);
+    if (!bucket) throw new Error(`Unknown checkpoint team ${teamId}`);
+    for (const witness of witnesses) {
+      if (!KINDS.includes(witness.kind)) throw new Error("Invalid checkpoint witness");
+      bucket.set(witness.kind, witness);
+    }
+  }
   const pollVariation = new Map<string, { qualifying?: ScenarioWitness; failing?: ScenarioWitness }>();
   const variableOutcomes: Outcome[] = input.allowHistoricalTies ? ["home", "away", "tie"] : ["home", "away"];
   let largestSpace: number | null = null;
   let evaluatedCompletions = 0;
+  let visitedCompletions = 0;
   let pendingReason: string | null = null;
+  const recordEliminated = new Set<string>();
+  const makeProof = (teamId: string, reason: string): ScenarioProof => {
+    const eliminated = recordEliminated.has(teamId) && !dataGap;
+    const r = completedRecords?.get(teamId)?.record;
+    const future = remaining.filter(g => g.homeTeamId === teamId || g.awayTeamId === teamId).length;
+    const total = r ? r.wins + r.losses + r.ties + future : 0;
+    const eligibilityBounds = r && !dataGap ? {
+      possible: total > 0 && 4 * (r.wins + future) + 2 * r.ties >= 3 * total,
+      guaranteed: total > 0 && 4 * r.wins + 2 * r.ties >= 3 * total,
+      minimumPercentageNumerator: 4 * r.wins + 2 * r.ties,
+      maximumPercentageNumerator: 4 * (r.wins + future) + 2 * r.ties,
+      thresholdNumerator: 3 * total, future
+    } : null;
+    return { ...base, teamId, state: eliminated ? "proved" : "pending",
+      label: eliminated ? "eliminated" : null, assumptions,
+      proofMetadata: eliminated ? JSON.stringify({ certificate: "exact maximum terminal record below .750",
+        scheduleFingerprint, snapshotInputHash: snapshot.inputHash,
+        fixedScheduleGameIds: remaining.map(game => game.id),
+        record: { wins: r!.wins, losses: r!.losses, ties: r!.ties, ...eligibilityBounds } }) :
+        JSON.stringify({ pendingReason: reason, eligibilityBounds,
+          certificate: "eligibility bounds only; no selection claim", scheduleFingerprint,
+          snapshotInputHash: snapshot.inputHash }),
+      runtimeMs: Date.now() - started,
+      witnesses: KINDS.flatMap(kind => buckets.get(teamId)!.get(kind) ? [buckets.get(teamId)!.get(kind)!] : []) };
+  };
+  let completedRecords: ReturnType<typeof computeEligibility> | null = null;
   const pending = (reason: string): ScenarioResult => ({
-    proofs: fbs.map(teamId => ({ ...base, teamId, state: "pending", label: null, assumptions,
-      proofMetadata: reason, runtimeMs: Date.now() - started, witnesses: KINDS.flatMap(kind =>
-        buckets.get(teamId)!.get(kind) ? [buckets.get(teamId)!.get(kind)!] : []) })),
+    proofs: fbs.map(teamId => makeProof(teamId, reason)),
     assumptions, evaluatedCompletions, possibleCompletions: largestSpace !== null &&
       Number.isSafeInteger(largestSpace) ? largestSpace : null,
-    pendingReason: reason
+    pendingReason: reason, nextCompletion: startCompletion + evaluatedCompletions, complete: false
   });
   if (dataGap) return pending(dataGap);
-  const completedRecords = computeEligibility({ season, teams, games: includedGames });
-  const maximumEligible = fbs.filter(id => {
+  completedRecords = computeEligibility({ season, teams, games: includedGames });
+  for (const id of fbs) {
     const record = completedRecords.get(id)!.record;
+    const future = remaining.filter(game => game.homeTeamId === id || game.awayTeamId === id).length;
+    const total = record.wins + record.losses + record.ties + future;
+    // No selection route (including swaps or eligible-voter poll additions) waives .750.
+    if (!total || 4 * (record.wins + future) + 2 * record.ties < 3 * total) recordEliminated.add(id);
+  }
+  const maximumEligible = fbs.filter(id => {
+    const record = completedRecords!.get(id)!.record;
     const future = remaining.filter(game => game.homeTeamId === id || game.awayTeamId === id).length;
     const total = record.wins + record.losses + record.ties + future;
     return total > 0 && 4 * (record.wins + future) + 2 * record.ties >= 3 * total;
   }).length;
+  if (recordEliminated.size === fbs.length) return {
+    proofs: fbs.map(id => makeProof(id, "")), assumptions, evaluatedCompletions: 0,
+    possibleCompletions: null, pendingReason: null, nextCompletion: startCompletion, complete: true
+  };
   largestSpace = variableOutcomes.length ** remaining.length * pollOrderCount(maximumEligible);
-  if (!Number.isSafeInteger(largestSpace) || largestSpace > maxCompletions) {
+  // Standalone/default exhaustive calls cannot finish a larger-than-budget
+  // space. Return sound record proofs immediately rather than spending seconds
+  // sampling poll orders that cannot certify any other status. Explicitly
+  // budgeted/resumable worker calls still make incremental witness progress.
+  if (input.startCompletion === undefined && input.maxCompletions === undefined &&
+    (!Number.isSafeInteger(largestSpace) || largestSpace > maxCompletions))
     return pending(`Full upper bound ${largestSpace} terminal completions exceeds cap ${maxCompletions}; no classification attempted`);
-  }
   const outcomes: Record<string, Outcome> = {};
   const terminalGames: Game[] = [...includedGames];
   function evaluate(pollOrder: string[], terminal: SeasonGames,
@@ -186,6 +242,8 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
     if (pendingReason) return;
     const candidates = eligible.filter(id => !automatic.has(id));
     if (chosen.length === count) {
+      if (visitedCompletions++ < startCompletion) return;
+      if (evaluatedCompletions >= maxCompletions) { pendingReason = `Scenario completion budget ${maxCompletions} exhausted`; return; }
       if (Date.now() - started >= maxRuntimeMs) { pendingReason = "Scenario runtime budget exhausted"; return; }
       const selected = new Set(chosen);
       const order = [...chosen, ...eligible.filter(id => !selected.has(id))].slice(0, 25);
@@ -228,6 +286,7 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
   if (pendingReason) return pending(pendingReason);
   const proofs: ScenarioProof[] = fbs.map(teamId => {
     const found = buckets.get(teamId)!;
+    if (recordEliminated.has(teamId)) return makeProof(teamId, "");
     const qualifying = found.has("qualifying"), failing = found.has("failing");
     const winQualifying = found.has("qualifying_win_out"), winFailing = found.has("failing_win_out");
     const label = !failing ? "clinched" : !qualifying ? "eliminated" :
@@ -239,14 +298,18 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
       found.set("qualifying_win_out", { ...pollPair.qualifying, kind: "qualifying_win_out" });
       found.set("failing_win_out", { ...pollPair.failing, kind: "failing_win_out" });
     }
+    const pollDependent = Boolean(pollPair) || label === "needs_help" &&
+      found.has("qualifying_win_out") && found.has("failing_win_out") &&
+      JSON.stringify(found.get("qualifying_win_out")!.gameOutcomes) ===
+        JSON.stringify(found.get("failing_win_out")!.gameOutcomes);
     return { ...base, teamId, state, label, assumptions,
       proofMetadata: JSON.stringify({ certificate: "exhaustive poll-equivalence classes", evaluatedCompletions,
         scheduleFingerprint, snapshotInputHash: snapshot.inputHash,
-        fixedScheduleGameIds: remaining.map(game => game.id), pollDependent: Boolean(pollPair),
+        fixedScheduleGameIds: remaining.map(game => game.id), pollDependent,
         exception: label ? null : "qualifies only outside winning-out completions; policy/model review required" }),
       runtimeMs: Date.now() - started,
       witnesses: KINDS.flatMap(kind => found.get(kind) ? [found.get(kind)!] : []) };
   });
-  return { proofs, assumptions, evaluatedCompletions, possibleCompletions: evaluatedCompletions,
-    pendingReason: null };
+  return { proofs, assumptions, evaluatedCompletions, possibleCompletions: visitedCompletions,
+    pendingReason: null, nextCompletion: startCompletion + evaluatedCompletions, complete: true };
 }

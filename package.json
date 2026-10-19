@@ -12,7 +12,8 @@
     "test": "bun test",
     "db:migrate": "bun packages/chars-db/src/migrate.ts",
     "data:backfill": "bun packages/chars-db/src/backfill.ts",
-    "snapshots:rebuild": "bun packages/chars-db/src/snapshots.ts"
+    "snapshots:rebuild": "bun packages/chars-db/src/snapshots.ts",
+    "scenarios:solve": "bun packages/chars-db/src/scenarios.ts"
   },
   "trustedDependencies": ["sharp", "unrs-resolver"]
 }

@@ -2,7 +2,7 @@ export const POLICY_VERSION = "selection-v1" as const;
 export const MODEL_VERSION = "colley-fbs-only-v1" as const;
 export const CALENDAR_POLICY_VERSION = "pre-ccg-weekend-v1" as const;
 export const POLL_MODEL_VERSION = "all-eligible-poll-orders-v1" as const;
-export const SOLVER_VERSION = "scenarios-v1" as const;
+export const SOLVER_VERSION = "scenarios-v2-record-resume" as const;
 
 export { computeColley } from "./colley";
 export type { ColleyResult, ColleyTeamRating } from "./colley";

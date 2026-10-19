@@ -1,6 +1,9 @@
 import { colleyInputFingerprint, includedRegularGames, type SeasonGames } from "./eligibility";
 
 type Fraction = { numerator: bigint; denominator: bigint };
+// Repeated terminal completions share the same FBS matchups and therefore C.
+// Keep only the most recent schedule: no unbounded cache across seasons/jobs.
+let lastFactor: { key: string; lower: number[][] } | null = null;
 const ZERO: Fraction = { numerator: 0n, denominator: 1n };
 function gcd(a: bigint, b: bigint): bigint {
   a = a < 0n ? -a : a;
@@ -81,9 +84,11 @@ export function computeColley(input: SeasonGames): ColleyResult {
   const n = ids.length;
   const matrix: number[][] = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j): number => i === j ? 2 : 0));
   const twiceB = Array(n).fill(2) as number[];
+  const matchups: string[] = [];
   for (const game of includedRegularGames(input)) {
     const home = index.get(game.homeTeamId), away = index.get(game.awayTeamId);
     if (home === undefined || away === undefined) continue;
+    matchups.push(`${Math.min(home, away)}:${Math.max(home, away)}`);
     matrix[home]![home]!++;
     matrix[away]![away]!++;
     matrix[home]![away]!--;
@@ -95,16 +100,21 @@ export function computeColley(input: SeasonGames): ColleyResult {
     if (matrix[i]!.reduce((sum, value) => sum + value, 0) !== 2) throw new Error("Colley row sum mismatch");
     for (let j = 0; j < i; j++) if (matrix[i]![j] !== matrix[j]![i]) throw new Error("Asymmetric Colley matrix");
   }
-  const lower = Array.from({ length: n }, () => Array<number>(n).fill(0));
-  for (let i = 0; i < n; i++) {
-    for (let j = 0; j <= i; j++) {
-      let value = matrix[i]![j]!;
-      for (let k = 0; k < j; k++) value -= lower[i]![k]! * lower[j]![k]!;
-      if (i === j) {
-        if (!(value > 0)) throw new Error("Colley matrix is not positive definite");
-        lower[i]![j] = Math.sqrt(value);
-      } else lower[i]![j] = value / lower[j]![j]!;
+  const key = JSON.stringify([ids, matchups.sort()]);
+  let lower = lastFactor?.key === key ? lastFactor.lower : null;
+  if (!lower) {
+    lower = Array.from({ length: n }, () => Array<number>(n).fill(0));
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j <= i; j++) {
+        let value = matrix[i]![j]!;
+        for (let k = 0; k < j; k++) value -= lower[i]![k]! * lower[j]![k]!;
+        if (i === j) {
+          if (!(value > 0)) throw new Error("Colley matrix is not positive definite");
+          lower[i]![j] = Math.sqrt(value);
+        } else lower[i]![j] = value / lower[j]![j]!;
+      }
     }
+    lastFactor = { key, lower };
   }
   const y = Array<number>(n).fill(0), ratings = Array<number>(n).fill(0);
   for (let i = 0; i < n; i++) {
