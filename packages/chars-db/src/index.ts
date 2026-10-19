@@ -81,8 +81,6 @@ export function createRepository(db: Database) {
     "SELECT season, team_id AS teamId, membership, conference FROM team_seasons WHERE season = ? AND team_id = ?");
   const games = prepareRows<Game, [number]>(db,
     "SELECT id, provider_game_id AS providerGameId, season, week, home_team_id AS homeTeamId, away_team_id AS awayTeamId, kickoff_utc AS kickoffUtc, home_score AS homeScore, away_score AS awayScore, status, completed, provider_season_type AS providerSeasonType, application_game_type AS applicationGameType, classification_source AS classificationSource, payload_hash AS payloadHash, result_revision AS resultRevision FROM games WHERE season = ? ORDER BY kickoff_utc, id");
-  const snapshots = prepareRows<Snapshot, [number]>(db,
-    "SELECT snapshot_key AS key, season, revision, input_hash AS inputHash, policy_version AS policyVersion, model_version AS modelVersion, calendar_policy_version AS calendarPolicyVersion, kind, week, game_cutoff_utc AS gameCutoffUtc, poll_cutoff_utc AS pollCutoffUtc, poll_release_id AS pollReleaseId, coverage_json AS coverage, published_at_utc AS publishedAtUtc FROM snapshots AS s WHERE season = ? AND published_at_utc IS NOT NULL AND NOT EXISTS (SELECT 1 FROM snapshots AS newer WHERE newer.snapshot_key = s.snapshot_key AND newer.revision > s.revision AND newer.published_at_utc IS NOT NULL) ORDER BY game_cutoff_utc DESC, revision DESC");
   const upsertSeason = db.query<void, [number, string, string | null, string, string]>(
     "INSERT INTO seasons (year, state, selection_freeze_utc, calendar_policy_version, coverage_json) VALUES (?, ?, ?, ?, ?) ON CONFLICT(year) DO UPDATE SET state=excluded.state, selection_freeze_utc=excluded.selection_freeze_utc, calendar_policy_version=excluded.calendar_policy_version, coverage_json=excluded.coverage_json");
   const upsertTeam = db.query<void, [string, string | null, string, string | null]>(
@@ -102,7 +100,8 @@ export function createRepository(db: Database) {
     },
     teamSeason: (year: number, id: string) => membership.get(year, id),
     gamesForSeason: (year: number) => games.all(year).map(game => ({ ...game, completed: Boolean(game.completed) })),
-    publishedSnapshots: (year: number) => snapshots.all(year),
+    publishedSnapshots: (year: number) => prepareRows<Snapshot, [number]>(db,
+      "SELECT s.snapshot_key AS key, s.season, s.revision, s.input_hash AS inputHash, s.policy_version AS policyVersion, s.model_version AS modelVersion, s.calendar_policy_version AS calendarPolicyVersion, s.kind, s.week, s.game_cutoff_utc AS gameCutoffUtc, s.poll_cutoff_utc AS pollCutoffUtc, s.poll_release_id AS pollReleaseId, s.coverage_json AS coverage, s.published_at_utc AS publishedAtUtc FROM snapshot_publications AS p JOIN snapshots AS s ON s.snapshot_key=p.snapshot_key AND s.revision=p.revision WHERE s.season = ? ORDER BY s.game_cutoff_utc DESC, s.revision DESC").all(year),
     saveSeason: (season: Season) => upsertSeason.run(season.year, season.state, season.selectionFreezeUtc, season.calendarPolicyVersion, season.coverage),
     saveTeam: (team: Team) => upsertTeam.run(team.id, team.providerId, team.name, team.abbreviation),
     saveTeamSeason: (teamSeason: TeamSeason) => upsertMembership.run(teamSeason.season, teamSeason.teamId, teamSeason.membership, teamSeason.conference),

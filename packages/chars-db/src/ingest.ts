@@ -57,14 +57,26 @@ export function currentFootballSeason(now = new Date()): number {
   return month < 7 ? year - 1 : year;
 }
 
-/** Week N poll is mapped to the start of game week N, after regular week N-1 ends.
- * This is a reconstruction convention, not a provider publication timestamp. */
-export function derivePollTiming(week: number, seasonType: string, calendar: readonly CalendarWeek[], ccgStart: string | null): string | null {
-  if (seasonType !== "regular" || week < 1) return null;
+/** Week N poll follows game week N-1. A missing next regular calendar week permits only the
+ * pre-CCG N+1 release, bounded by the first CCG; neither bound is an actual release time. */
+export function pollTimingConvention(week: number, seasonType: string, calendar: readonly CalendarWeek[], ccgStart: string | null):
+  { effectiveAtUtc: string | null; provenance: "derived_convention" | "derived_pre_ccg_cutoff" | "unknown" } {
+  const unknown = { effectiveAtUtc: null, provenance: "unknown" as const };
+  if (seasonType !== "regular" || week < 1) return unknown;
   const previous = calendar.find(w => w.seasonType === "regular" && w.week === week - 1);
   const next = calendar.find(w => w.seasonType === "regular" && w.week === week);
-  if (!previous || !next || previous.endUtc > next.startUtc || (ccgStart && next.startUtc >= ccgStart)) return null;
-  return next.startUtc;
+  if (!previous || (ccgStart && previous.endUtc >= ccgStart)) return unknown;
+  // A later completed regular weekend means this is not the final pre-CCG weekend.
+  if (next && previous.endUtc < next.startUtc && (!ccgStart || next.startUtc < ccgStart))
+    return { effectiveAtUtc: next.startUtc, provenance: "derived_convention" };
+  if (ccgStart && (!next || next.startUtc >= ccgStart) && calendar.filter(w => w.seasonType === "regular" && w.endUtc < ccgStart)
+    .every(w => w.endUtc <= previous.endUtc))
+    return { effectiveAtUtc: ccgStart, provenance: "derived_pre_ccg_cutoff" };
+  return unknown;
+}
+
+export function derivePollTiming(week: number, seasonType: string, calendar: readonly CalendarWeek[], ccgStart: string | null): string | null {
+  return pollTimingConvention(week, seasonType, calendar, ccgStart).effectiveAtUtc;
 }
 
 export function ingestSeason(db: Database, year: number, input: SeasonInput): IngestionReport {
@@ -220,11 +232,12 @@ export function ingestSeason(db: Database, year: number, input: SeasonInput): In
       const current = db.query<{ id: string; effective_at_utc: string | null }, [number, string, string, number]>(
         "SELECT id, effective_at_utc FROM poll_releases WHERE season=? AND poll_type=? AND provider_season_type=? AND game_week=? AND is_current=1")
         .get(year, pollType, week.seasonType, week.week);
-      const timing = derivePollTiming(week.week, week.seasonType, input.calendar.items, ccgStart);
+      const { effectiveAtUtc: timing, provenance } = pollTimingConvention(week.week, week.seasonType, input.calendar.items, ccgStart);
       if (current?.id === id) {
-        if (current.effective_at_utc !== timing) {
+        if (current.effective_at_utc !== timing || db.query<{ timing_provenance: string }, [string]>(
+          "SELECT timing_provenance FROM poll_releases WHERE id=?").get(id)?.timing_provenance !== provenance) {
           db.query("UPDATE poll_releases SET effective_at_utc=?, timing_provenance=? WHERE id=?")
-            .run(timing, timing ? "derived_convention" : "unknown", id);
+            .run(timing, provenance, id);
           invalidate("poll_timing_changed", id);
         }
         continue;
@@ -236,12 +249,12 @@ export function ingestSeason(db: Database, year: number, input: SeasonInput): In
       // A previously observed hash can recur; reactivate rather than duplicate its entries.
       if (db.query("SELECT 1 FROM poll_releases WHERE id=?").get(id)) {
         db.query("UPDATE poll_releases SET is_current=1, effective_at_utc=?, timing_provenance=? WHERE id=?")
-          .run(timing, timing ? "derived_convention" : "unknown", id);
+          .run(timing, provenance, id);
         continue;
       }
       db.query(`INSERT INTO poll_releases (id, season, poll_type, provider_season_type, game_week, released_at_utc, effective_at_utc,
         source_hash, payload_id, timing_provenance) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`)
-        .run(id, year, pollType, week.seasonType, week.week, timing, sourceHash, rankingsId, timing ? "derived_convention" : "unknown");
+        .run(id, year, pollType, week.seasonType, week.week, timing, sourceHash, rankingsId, provenance);
       for (const entry of poll.entries) {
         const identity = resolver.byProviderId(entry.teamId);
         db.query("INSERT INTO poll_entries (release_id, team_id, rank, points) VALUES (?, ?, ?, ?)")

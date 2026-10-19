@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { createClient } from "chars-cfbd";
 import { openDatabase } from "../src/index";
 import { parseBackfillArgs } from "../src/backfill";
-import { currentFootballSeason, fetchSeason, ingestSeason } from "../src/ingest";
+import { currentFootballSeason, derivePollTiming, fetchSeason, ingestSeason, pollTimingConvention } from "../src/ingest";
 import { migrate } from "../src/migrate";
+import { rebuildSnapshots, publishedSnapshot } from "../src/snapshots";
 import { gamesAtCutoff, pollsAtCutoff } from "../src/temporal";
 
 const dirs: string[] = [];
@@ -186,5 +187,45 @@ test("poll week convention, corrected release supersession, calendar revision in
     expect(gamesAtCutoff(db, year, "1998-09-16T00:00:00Z")).toEqual([]);
     expect(db.query("SELECT * FROM snapshot_input_invalidations WHERE reason='game_revised'").all()).toHaveLength(1);
     expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
+  } finally { db.close(); }
+});
+
+test("N+1 AP poll without a next regular calendar week publishes a pre-CCG final, never a later release", async () => {
+  const db = await setup();
+  try {
+    const completed = { ...base, completed: true, status: "completed", homePoints: 14, awayPoints: 7 };
+    const ccg = { ...completed, id: 12, seasonType: "postseason", week: 2,
+      startDate: "1998-09-12T20:00:00Z", notes: "Conference Championship" };
+    const calendar = [{ season: year, seasonType: "regular", week: 1,
+      startDate: "1998-09-01T00:00:00Z", endDate: "1998-09-08T00:00:00Z" }];
+    const rankings = [
+      { season: year, seasonType: "regular", week: 2, polls: [{ poll: "AP Top 25", isFinal: false,
+        ranks: [{ teamId: 1, school: "School 1", rank: 1, points: 10 }] }] },
+      { season: year, seasonType: "postseason", week: 3, polls: [{ poll: "AP Top 25", isFinal: true,
+        ranks: [{ teamId: 1, school: "School 1", rank: 1, points: 20 }] }] }
+    ];
+    const report = ingestSeason(db, year, await fetchSeason(client([completed, ccg], rankings, calendar), year));
+    expect(report.coverage).toMatchObject({ pollReleaseTiming: false, selectionFreeze: true });
+    // The postseason poll remains unmapped; the regular N+1 poll is bounded, not timestamped.
+    const poll = db.query<{ id: string; effective_at_utc: string; released_at_utc: string | null; timing_provenance: string }, []>(
+      "SELECT id,effective_at_utc,released_at_utc,timing_provenance FROM poll_releases WHERE provider_season_type='regular'").get()!;
+    expect(poll).toMatchObject({ effective_at_utc: "1998-09-12T20:00:00.000Z",
+      released_at_utc: null, timing_provenance: "derived_pre_ccg_cutoff" });
+    expect(derivePollTiming(3, "postseason", calendar as never, "1998-09-12T20:00:00.000Z")).toBeNull();
+    expect(pollTimingConvention(2, "regular", calendar as never, "1998-09-12T20:00:00.000Z").provenance)
+      .toBe("derived_pre_ccg_cutoff");
+    const result = rebuildSnapshots(db, year, "1998-09-20T00:00:00.000Z");
+    expect(result.published).toContain("1998:selection-final");
+    expect(result.incomplete.some(gap => gap.key === "1998:selection-final")).toBe(false);
+    const final = db.query<{ poll_release_id: string; coverage_json: string }, []>(
+      "SELECT poll_release_id,coverage_json FROM snapshots WHERE snapshot_key='1998:selection-final'").get()!;
+    expect(final.poll_release_id).toBe(poll.id);
+    expect(JSON.parse(final.coverage_json).poll.timingProvenance).toBe("derived_pre_ccg_cutoff");
+    expect(db.query<{ game_id: string }, []>("SELECT game_id FROM snapshot_games WHERE snapshot_key='1998:selection-final'").all()
+      .map(row => row.game_id)).toEqual(["cfbd:11"]);
+    db.query("UPDATE poll_releases SET released_at_utc='1998-09-13T00:00:00.000Z' WHERE id=?").run(poll.id);
+    expect(rebuildSnapshots(db, year, "1998-09-20T00:00:00.000Z").incomplete.find(g => g.key === "1998:selection-final")?.reasons)
+      .toContain("missing corresponding pre-CCG poll release");
+    expect(publishedSnapshot(db, "1998:selection-final")?.revision).toBe(1);
   } finally { db.close(); }
 });
