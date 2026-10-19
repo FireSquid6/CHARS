@@ -77,16 +77,21 @@ test("record proof survives exponential schedules and budget zero, with provenan
     .find(p => p.teamId === "T0")?.label).toBeNull();
 });
 
-test("deterministic completion cursor matches one-shot exhaustive proofs", () => {
+test("unverified cursors and prior witnesses cannot manufacture exhaustive proofs", () => {
   const input = fixture(["A", "B"], { A: ["FCS", "FCS"], B: ["FCS", "FCS"] }, [["A", "B"]]);
   const first = computeScenarios({ ...input, maxCompletions: 1 });
   expect(first.complete).toBe(false);
   expect(first.proofs.every(p => p.label === null)).toBe(true);
   const initialWitnesses = Object.fromEntries(first.proofs.map(p => [p.teamId, p.witnesses]));
-  const second = computeScenarios({ ...input, startCompletion: first.nextCompletion,
-    initialWitnesses, maxCompletions: 1 });
-  expect(second.complete).toBe(true);
-  expect(second.proofs.map(p => p.label)).toEqual(computeScenarios(input).proofs.map(p => p.label));
+  expect(() => computeScenarios({ ...input, startCompletion: first.nextCompletion,
+    initialWitnesses, maxCompletions: 1 })).toThrow(/Unverified scenario cursor/);
+  expect(() => computeScenarios({ ...input, startCompletion: 999, maxCompletions: 1 }))
+    .toThrow(/Unverified scenario cursor/);
+  const retry = computeScenarios({ ...input, maxCompletions: 1 });
+  expect(retry.complete).toBe(false);
+  expect(retry.nextCompletion).toBe(1);
+  expect(computeScenarios({ ...input, maxCompletions: 2 }).proofs.map(p => p.label))
+    .toEqual(computeScenarios(input).proofs.map(p => p.label));
 });
 
 test("poll-dependent needs help quantifies over all eligible poll orders, even with no games", () => {
@@ -108,7 +113,7 @@ test("poll combinatorics and exhausted runtime remain pending, not a claimed lab
   const result = computeScenarios(input);
   expect(result.pendingReason).toContain("cap");
   expect(result.evaluatedCompletions).toBe(0);
-  const incremental = computeScenarios({ ...input, startCompletion: 0, maxCompletions: 1 });
+  const incremental = computeScenarios({ ...input, maxCompletions: 1 });
   expect(incremental.evaluatedCompletions).toBe(1);
   expect(incremental.proofs.every(p => p.label === null)).toBe(true);
   expect(result.proofs.every(p => p.state === "pending" && p.label === null)).toBe(true);
@@ -119,6 +124,13 @@ test("poll combinatorics and exhausted runtime remain pending, not a claimed lab
     { A: ["FCS", "FCS"], B: ["FCS", "FCS"] }, [["A", "B"]]), maxTrackedPollPaths: 1 });
   expect(memory.pendingReason).toContain("memory budget");
   expect(memory.proofs.every(p => p.label === null)).toBe(true);
+  expect(memory.evaluatedCompletions).toBe(1);
+  const partialLeaf = fixture(["A", "B", "C"], { A: ["FCS"], B: ["FCS"], C: ["FCS"] });
+  const stopped = computeScenarios({ ...partialLeaf, maxTrackedPollPaths: 2 });
+  expect(stopped.evaluatedCompletions).toBe(0);
+  expect(stopped.proofs.every(p => p.label === null)).toBe(true);
+  expect(computeScenarios({ ...partialLeaf, maxTrackedPollPaths: 3 }).proofs.map(p => p.label))
+    .toEqual(computeScenarios(partialLeaf).proofs.map(p => p.label));
 });
 
 test("historical ties require an explicit pre-overtime option", () => {

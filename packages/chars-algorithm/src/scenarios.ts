@@ -21,10 +21,6 @@ export interface ScenarioInput extends SeasonGames {
   maxRuntimeMs?: number;
   /** Maximum stored distinct win-out game paths across teams. Defaults to 10,000. */
   maxTrackedPollPaths?: number;
-  /** Number of deterministic poll-equivalence leaves already processed by a prior run. */
-  startCompletion?: number;
-  /** Previously persisted witnesses; never treated as proof without matching input identity. */
-  initialWitnesses?: Record<string, ScenarioWitness[]>;
 }
 
 export interface ScenarioResult {
@@ -64,8 +60,10 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
   if (!Number.isSafeInteger(maxCompletions) || maxCompletions < 1 ||
     !Number.isFinite(maxRuntimeMs) || maxRuntimeMs < 0 ||
     !Number.isSafeInteger(maxTrackedPollPaths) || maxTrackedPollPaths < 1) throw new Error("Invalid scenario budget");
-  const startCompletion = input.startCompletion ?? 0;
-  if (!Number.isSafeInteger(startCompletion) || startCompletion < 0) throw new Error("Invalid scenario cursor");
+  // This solver intentionally has no cursor: a prefix cannot certify an
+  // exhaustive result without a verified frontier and complete accumulator.
+  if ("startCompletion" in input || "initialWitnesses" in input)
+    throw new Error("Unverified scenario cursor/witnesses are unsupported; restart from zero");
   // Validate even excluded games. Missing opponent membership is an unresolved
   // coverage gap, not evidence that the game can be discarded.
   let validationGap: string | null = null;
@@ -131,19 +129,10 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
   const base = { snapshotKey: snapshot.key, snapshotRevision: snapshot.revision,
     pollModelVersion: POLL_MODEL_VERSION, solverVersion: SOLVER_VERSION };
   const buckets = new Map(fbs.map(teamId => [teamId, new Map<WitnessKind, ScenarioWitness>()]));
-  for (const [teamId, witnesses] of Object.entries(input.initialWitnesses ?? {})) {
-    const bucket = buckets.get(teamId);
-    if (!bucket) throw new Error(`Unknown checkpoint team ${teamId}`);
-    for (const witness of witnesses) {
-      if (!KINDS.includes(witness.kind)) throw new Error("Invalid checkpoint witness");
-      bucket.set(witness.kind, witness);
-    }
-  }
   const pollVariation = new Map<string, { qualifying?: ScenarioWitness; failing?: ScenarioWitness }>();
   const variableOutcomes: Outcome[] = input.allowHistoricalTies ? ["home", "away", "tie"] : ["home", "away"];
   let largestSpace: number | null = null;
   let evaluatedCompletions = 0;
-  let visitedCompletions = 0;
   let pendingReason: string | null = null;
   const recordEliminated = new Set<string>();
   const makeProof = (teamId: string, reason: string): ScenarioProof => {
@@ -175,7 +164,7 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
     proofs: fbs.map(teamId => makeProof(teamId, reason)),
     assumptions, evaluatedCompletions, possibleCompletions: largestSpace !== null &&
       Number.isSafeInteger(largestSpace) ? largestSpace : null,
-    pendingReason: reason, nextCompletion: startCompletion + evaluatedCompletions, complete: false
+    pendingReason: reason, nextCompletion: evaluatedCompletions, complete: false
   });
   if (dataGap) return pending(dataGap);
   completedRecords = computeEligibility({ season, teams, games: includedGames });
@@ -194,14 +183,12 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
   }).length;
   if (recordEliminated.size === fbs.length) return {
     proofs: fbs.map(id => makeProof(id, "")), assumptions, evaluatedCompletions: 0,
-    possibleCompletions: null, pendingReason: null, nextCompletion: startCompletion, complete: true
+    possibleCompletions: null, pendingReason: null, nextCompletion: 0, complete: true
   };
   largestSpace = variableOutcomes.length ** remaining.length * pollOrderCount(maximumEligible);
-  // Standalone/default exhaustive calls cannot finish a larger-than-budget
-  // space. Return sound record proofs immediately rather than spending seconds
-  // sampling poll orders that cannot certify any other status. Explicitly
-  // budgeted/resumable worker calls still make incremental witness progress.
-  if (input.startCompletion === undefined && input.maxCompletions === undefined &&
+  // The default standalone cap returns immediately. Explicit worker budgets
+  // may collect witnesses, but cannot classify without exhaustive coverage.
+  if (input.maxCompletions === undefined &&
     (!Number.isSafeInteger(largestSpace) || largestSpace > maxCompletions))
     return pending(`Full upper bound ${largestSpace} terminal completions exceeds cap ${maxCompletions}; no classification attempted`);
   const outcomes: Record<string, Outcome> = {};
@@ -211,10 +198,19 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
     const bracket = computePlayoff({ ...terminal, ratings, records,
       pollEntries: pollOrder.map((teamId, index) => ({ teamId, rank: index + 1 })) }, snapshot);
     const qualified = new Set([...bracket.seeding.selection.bid, ...bracket.seeding.selection.playin]);
-    evaluatedCompletions++;
+    // Reserve capacity for the ENTIRE leaf before writing any team's witness.
+    // A memory stop here must not publish a partial prefix as processed.
+    const winOutIds = fbs.filter(teamId => remaining.every(game =>
+      game.homeTeamId !== teamId && game.awayTeamId !== teamId ||
+      outcomes[game.id] === (game.homeTeamId === teamId ? "home" : "away")));
+    const newPaths = winOutIds.filter(teamId => !pollVariation.has(JSON.stringify([teamId, outcomes]))).length;
+    if (pollVariation.size + newPaths > maxTrackedPollPaths) {
+      pendingReason = `Poll-path memory budget ${maxTrackedPollPaths} exhausted`;
+      return;
+    }
+    const winOutSet = new Set(winOutIds);
     for (const teamId of fbs) {
-      const winOut = remaining.every(game => game.homeTeamId !== teamId && game.awayTeamId !== teamId ||
-        outcomes[game.id] === (game.homeTeamId === teamId ? "home" : "away"));
+      const winOut = winOutSet.has(teamId);
       const qualifies = qualified.has(teamId);
       const kinds: WitnessKind[] = [qualifies ? "qualifying" : "failing"];
       if (winOut) kinds.push(qualifies ? "qualifying_win_out" : "failing_win_out");
@@ -226,15 +222,12 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
       }
       if (winOut) {
         const key = JSON.stringify([teamId, outcomes]);
-        if (!pollVariation.has(key) && pollVariation.size >= maxTrackedPollPaths) {
-          pendingReason = `Poll-path memory budget ${maxTrackedPollPaths} exhausted`;
-          return;
-        }
         const variation = pollVariation.get(key) ?? {};
         variation[qualifies ? "qualifying" : "failing"] = witness;
         pollVariation.set(key, variation);
       }
     }
+    evaluatedCompletions++;
   }
   function polls(eligible: string[], automatic: Set<string>, chosen: string[], offset: number,
     count: number, terminal: SeasonGames, ratings: ReturnType<typeof computeColley>,
@@ -242,7 +235,6 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
     if (pendingReason) return;
     const candidates = eligible.filter(id => !automatic.has(id));
     if (chosen.length === count) {
-      if (visitedCompletions++ < startCompletion) return;
       if (evaluatedCompletions >= maxCompletions) { pendingReason = `Scenario completion budget ${maxCompletions} exhausted`; return; }
       if (Date.now() - started >= maxRuntimeMs) { pendingReason = "Scenario runtime budget exhausted"; return; }
       const selected = new Set(chosen);
@@ -310,6 +302,6 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
       runtimeMs: Date.now() - started,
       witnesses: KINDS.flatMap(kind => found.get(kind) ? [found.get(kind)!] : []) };
   });
-  return { proofs, assumptions, evaluatedCompletions, possibleCompletions: visitedCompletions,
-    pendingReason: null, nextCompletion: startCompletion + evaluatedCompletions, complete: true };
+  return { proofs, assumptions, evaluatedCompletions, possibleCompletions: evaluatedCompletions,
+    pendingReason: null, nextCompletion: evaluatedCompletions, complete: true };
 }

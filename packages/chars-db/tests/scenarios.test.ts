@@ -48,20 +48,81 @@ async function fixture() {
   return { db, game };
 }
 
-test("bounded work remains pending, resumes, and publishes terminal labels atomically", async () => {
+test("bounded retries restart; only exhaustive run publishes terminal labels atomically", async () => {
   const { db } = await fixture();
   try {
     const budget = { maxCompletions: 1, maxRuntimeMs: 10000, maxTrackedPollPaths: 100 };
     const first = solveSnapshot(db, "week", budget);
     expect(first.state).toBe("pending");
-    expect(first.nextCompletion).toBe(1);
+    expect(first.evaluated).toBe(1);
     expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM scenario_statuses WHERE state='proved'").get()?.n).toBe(0);
     const second = solveSnapshot(db, "week", budget);
     expect(second.jobId).toBe(first.jobId);
-    expect(second.state).toBe("proved");
-    expect(second.nextCompletion).toBe(2);
+    expect(second.state).toBe("pending");
+    expect(second.evaluated).toBe(1);
+    const exhaustive = solveSnapshot(db, "week", { ...budget, maxCompletions: 2 });
+    expect(exhaustive.state).toBe("proved");
+    expect(exhaustive.evaluated).toBe(2);
     expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM scenario_witnesses").get()?.n).toBeGreaterThan(0);
     expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM scenario_statuses WHERE state='proved'").get()?.n).toBe(2);
+    const proof = db.query<{ proof_metadata_json: string }, []>(
+      "SELECT proof_metadata_json FROM scenario_statuses WHERE team_id='A'").get();
+    expect(JSON.parse(proof!.proof_metadata_json).evaluatedCompletions).toBe(2);
+  } finally { db.close(); }
+});
+
+test("memory interruption and smaller budgets never carry partial-leaf witnesses into proof", async () => {
+  const { db } = await fixture();
+  try {
+    const stopped = solveSnapshot(db, "week", { maxCompletions: 2, maxRuntimeMs: 10000,
+      maxTrackedPollPaths: 1 });
+    expect(stopped.state).toBe("pending");
+    expect(stopped.evaluated).toBe(1);
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM scenario_statuses WHERE state='proved'").get()?.n).toBe(0);
+    const retry = solveSnapshot(db, "week", { maxCompletions: 1, maxRuntimeMs: 10000,
+      maxTrackedPollPaths: 2 });
+    expect(retry.state).toBe("pending");
+    expect(retry.evaluated).toBe(1);
+    const done = solveSnapshot(db, "week", { maxCompletions: 2, maxRuntimeMs: 10000,
+      maxTrackedPollPaths: 2 });
+    expect(done.state).toBe("proved");
+    expect(done.evaluated).toBe(2);
+  } finally { db.close(); }
+});
+
+test("tampered persisted cursor is rejected; failed run releases its lease", async () => {
+  const { db } = await fixture();
+  try {
+    const budget = { maxCompletions: 1, maxRuntimeMs: 10000, maxTrackedPollPaths: 100 };
+    const first = solveSnapshot(db, "week", budget);
+    db.query("UPDATE scenario_jobs SET checkpoint_json=? WHERE id=?")
+      .run(JSON.stringify({ mode: "restart-only", lastEvaluated: 1, nextCompletion: 999 }), first.jobId);
+    expect(() => solveSnapshot(db, "week", budget)).toThrow(/Unverified scenario checkpoint/);
+    expect(db.query<{ lease_owner: string | null; state: string }, [string]>(
+      "SELECT lease_owner,state FROM scenario_jobs WHERE id=?").get(first.jobId))
+      .toMatchObject({ lease_owner: null, state: "pending" });
+    db.query("UPDATE scenario_jobs SET checkpoint_json=? WHERE id=?")
+      .run(JSON.stringify({ mode: "restart-only", lastEvaluated: 1 }), first.jobId);
+    expect(() => solveSnapshot(db, "week", budget, () => { throw new Error("publication fault"); }))
+      .toThrow("publication fault");
+    expect(db.query<{ lease_owner: string | null; state: string }, [string]>(
+      "SELECT lease_owner,state FROM scenario_jobs WHERE id=?").get(first.jobId))
+      .toMatchObject({ lease_owner: null, state: "pending" });
+    expect(solveSnapshot(db, "week", { ...budget, maxCompletions: 2 }).state).toBe("proved");
+  } finally { db.close(); }
+});
+
+test("solver exceptions release leases and modern worker rejects historical ties", async () => {
+  const { db } = await fixture();
+  try {
+    expect(() => solveSnapshot(db, "week", { maxCompletions: 0, maxRuntimeMs: 10000,
+      maxTrackedPollPaths: 100 })).toThrow("Invalid scenario budget");
+    expect(db.query<{ lease_owner: string | null }, []>("SELECT lease_owner FROM scenario_jobs").get()?.lease_owner)
+      .toBeNull();
+    expect(() => solveSnapshot(db, "week", { maxCompletions: 2, maxRuntimeMs: 10000,
+      maxTrackedPollPaths: 100, allowHistoricalTies: true })).toThrow(/before 1996/);
+    expect(solveSnapshot(db, "week", { maxCompletions: 2, maxRuntimeMs: 10000,
+      maxTrackedPollPaths: 100 }).state).toBe("proved");
   } finally { db.close(); }
 });
 

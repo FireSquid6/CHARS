@@ -2,7 +2,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import { computeScenarios, POLL_MODEL_VERSION, SOLVER_VERSION,
-  type Game, type ScenarioInput, type ScenarioWitness, type SnapshotIdentity, type TeamSeason } from "chars-algorithm";
+  type Game, type ScenarioInput, type SnapshotIdentity, type TeamSeason } from "chars-algorithm";
 import { configFromEnv, openDatabase, transaction } from "./index";
 import { migrate } from "./migrate";
 
@@ -11,7 +11,8 @@ type SnapshotRow = { snapshot_key: string; revision: number; season: number; kin
   calendar_policy_version: string; coverage_json: string; state: string };
 type Job = { id: string; state: string; input_hash: string; input_generation: number;
   checkpoint_json: string | null; lease_owner: string | null; lease_expires_utc: string | null };
-type Budget = { maxCompletions: number; maxRuntimeMs: number; maxTrackedPollPaths: number };
+type Budget = { maxCompletions: number; maxRuntimeMs: number; maxTrackedPollPaths: number;
+  allowHistoricalTies?: boolean };
 const one = <T>(db: Database, sql: string, ...bindings: (number | string)[]) => db.query(sql).get(...bindings) as T | null;
 const all = <T>(db: Database, sql: string, ...bindings: (number | string)[]) => db.query(sql).all(...bindings) as T[];
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -69,8 +70,12 @@ export function solveSnapshot(db: Database, key: string, budget: Budget = {
       inputHash: snapshot.input_hash, policyVersion: snapshot.policy_version,
       modelVersion: snapshot.model_version, calendarPolicyVersion: snapshot.calendar_policy_version };
     const input: ScenarioInput = { snapshot: identity, season: snapshot.season, teams, games,
-      gameCutoffUtc: snapshot.game_cutoff_utc, selectionFreezeUtc: freeze, scheduleComplete };
-    const inputHash = sha([identity, generation, freeze, scheduleComplete, teams, games, POLL_MODEL_VERSION, SOLVER_VERSION]);
+      gameCutoffUtc: snapshot.game_cutoff_utc, selectionFreezeUtc: freeze, scheduleComplete,
+      allowHistoricalTies: budget.allowHistoricalTies === true };
+    if (input.allowHistoricalTies && snapshot.season >= 1996)
+      throw new Error("Historical ties are permitted only before 1996");
+    const inputHash = sha([identity, generation, freeze, scheduleComplete, teams, games,
+      input.allowHistoricalTies, POLL_MODEL_VERSION, SOLVER_VERSION]);
     return { input, generation, inputHash };
   });
   const { input, generation, inputHash } = loaded;
@@ -92,11 +97,23 @@ export function solveSnapshot(db: Database, key: string, budget: Budget = {
       db.query(`INSERT INTO scenario_jobs (id,snapshot_key,snapshot_revision,poll_model_version,
         solver_version,input_hash,state,checkpoint_json,created_at_utc,updated_at_utc,input_generation,budget_json)
         VALUES (?,?,?,?,?,?,'pending',?, ?,?,?,?)`).run(jobId, key, input.snapshot.revision,
-        POLL_MODEL_VERSION, SOLVER_VERSION, inputHash, JSON.stringify({ nextCompletion: 0 }), now, now,
+        POLL_MODEL_VERSION, SOLVER_VERSION, inputHash, JSON.stringify({ mode: "restart-only", lastEvaluated: 0 }), now, now,
         generation, JSON.stringify(budget));
       row = one<Job>(db, "SELECT * FROM scenario_jobs WHERE id=?", jobId)!;
     }
     if (row.state === "proved" || row.state === "unsupported") return row;
+    if (row.checkpoint_json !== null) {
+      const checkpoint: unknown = JSON.parse(row.checkpoint_json);
+      if (!checkpoint || typeof checkpoint !== "object" || Array.isArray(checkpoint) ||
+        (checkpoint as { mode?: unknown }).mode !== "restart-only" ||
+        !Number.isSafeInteger((checkpoint as { lastEvaluated?: number }).lastEvaluated) ||
+        (checkpoint as { lastEvaluated: number }).lastEvaluated < 0 ||
+        "nextCompletion" in checkpoint ||
+        (checkpoint as { lastEvaluated: number }).lastEvaluated !==
+          one<{ evaluated_completions: number }>(db,
+            "SELECT evaluated_completions FROM scenario_jobs WHERE id=?", jobId)?.evaluated_completions)
+        throw new Error("Unverified scenario checkpoint; cannot resume or publish");
+    }
     if (row.lease_expires_utc && row.lease_expires_utc > now && row.lease_owner !== owner)
       throw new Error("Scenario job already leased");
     db.query(`UPDATE scenario_jobs SET state='running',lease_owner=?,lease_expires_utc=?,
@@ -106,43 +123,50 @@ export function solveSnapshot(db: Database, key: string, budget: Budget = {
     return row;
   });
   if (job.state === "proved" || job.state === "unsupported") return { jobId, state: job.state, evaluated: 0 };
-  const previous = all<{ team_id: string; witness_json: string }>(db, `SELECT team_id,witness_json
-    FROM scenario_witnesses WHERE job_id=?`, jobId);
-  const initialWitnesses: Record<string, ScenarioWitness[]> = {};
-  for (const row of previous) (initialWitnesses[row.team_id] ??= []).push(JSON.parse(row.witness_json) as ScenarioWitness);
-  const startCompletion = (JSON.parse(job.checkpoint_json ?? "{}") as { nextCompletion?: number }).nextCompletion ?? 0;
-  const result = computeScenarios({ ...input, ...budget, startCompletion, initialWitnesses });
-  beforePublish?.();
-  transaction(db, () => {
-    guard();
-    const current = one<Job>(db, "SELECT * FROM scenario_jobs WHERE id=?", jobId);
-    if (current?.lease_owner !== owner) throw new Error("Scenario lease lost");
-    for (const proof of result.proofs) {
-      db.query(`INSERT INTO scenario_statuses (job_id,team_id,state,label,assumptions_json,proof_metadata_json,runtime_ms)
-        VALUES (?,?,?,?,?,?,?) ON CONFLICT(job_id,team_id) DO UPDATE SET
-        state=excluded.state,label=excluded.label,assumptions_json=excluded.assumptions_json,
-        proof_metadata_json=excluded.proof_metadata_json,runtime_ms=excluded.runtime_ms`).run(jobId,
-        proof.teamId, proof.state, proof.label, JSON.stringify(proof.assumptions), proof.proofMetadata, proof.runtimeMs);
-      for (const witness of proof.witnesses) db.query(`INSERT INTO scenario_witnesses
-        (job_id,team_id,kind,sequence,witness_json) VALUES (?,?,?,1,?)
-        ON CONFLICT(job_id,team_id,kind,sequence) DO NOTHING`).run(jobId, proof.teamId, witness.kind, JSON.stringify(witness));
-    }
-    const state = result.complete ? result.proofs.some(p => p.state === "unsupported") ? "unsupported" : "proved" : "pending";
-    db.query(`UPDATE scenario_jobs SET state=?, checkpoint_json=?,evaluated_completions=?,
-      lease_owner=NULL,lease_expires_utc=NULL,updated_at_utc=? WHERE id=?`).run(state,
-      JSON.stringify({ nextCompletion: result.nextCompletion, pendingReason: result.pendingReason,
-        possibleCompletions: result.possibleCompletions }), result.nextCompletion,
-      new Date().toISOString(), jobId);
-  });
-  return { jobId, state: result.complete ? result.proofs.some(p => p.state === "unsupported") ?
-    "unsupported" : "proved" : "pending", evaluated: result.evaluatedCompletions,
-    nextCompletion: result.nextCompletion, pendingReason: result.pendingReason };
+  try {
+    const result = computeScenarios({ ...input, ...budget });
+    beforePublish?.();
+    transaction(db, () => {
+      guard();
+      const current = one<Job>(db, "SELECT * FROM scenario_jobs WHERE id=?", jobId);
+      if (current?.lease_owner !== owner) throw new Error("Scenario lease lost");
+      // An earlier attempt has no certified prefix. Its witnesses cannot
+      // contribute to the new run's exhaustive classification.
+      db.query("DELETE FROM scenario_witnesses WHERE job_id=?").run(jobId);
+      db.query("DELETE FROM scenario_statuses WHERE job_id=?").run(jobId);
+      for (const proof of result.proofs) {
+        db.query(`INSERT INTO scenario_statuses (job_id,team_id,state,label,assumptions_json,proof_metadata_json,runtime_ms)
+          VALUES (?,?,?,?,?,?,?) ON CONFLICT(job_id,team_id) DO UPDATE SET
+          state=excluded.state,label=excluded.label,assumptions_json=excluded.assumptions_json,
+          proof_metadata_json=excluded.proof_metadata_json,runtime_ms=excluded.runtime_ms`).run(jobId,
+          proof.teamId, proof.state, proof.label, JSON.stringify(proof.assumptions), proof.proofMetadata, proof.runtimeMs);
+        for (const witness of proof.witnesses) db.query(`INSERT INTO scenario_witnesses
+          (job_id,team_id,kind,sequence,witness_json) VALUES (?,?,?,1,?)
+          ON CONFLICT(job_id,team_id,kind,sequence) DO NOTHING`).run(jobId, proof.teamId, witness.kind, JSON.stringify(witness));
+      }
+      const state = result.complete ? result.proofs.some(p => p.state === "unsupported") ? "unsupported" : "proved" : "pending";
+      db.query(`UPDATE scenario_jobs SET state=?, checkpoint_json=?,evaluated_completions=?,
+        lease_owner=NULL,lease_expires_utc=NULL,updated_at_utc=? WHERE id=?`).run(state,
+        JSON.stringify({ mode: "restart-only", lastEvaluated: result.evaluatedCompletions,
+          pendingReason: result.pendingReason, possibleCompletions: result.possibleCompletions }),
+        result.evaluatedCompletions, new Date().toISOString(), jobId);
+    });
+    return { jobId, state: result.complete ? result.proofs.some(p => p.state === "unsupported") ?
+      "unsupported" : "proved" : "pending", evaluated: result.evaluatedCompletions,
+      pendingReason: result.pendingReason };
+  } finally {
+    transaction(db, () => {
+      db.query(`UPDATE scenario_jobs SET state='pending',lease_owner=NULL,lease_expires_utc=NULL,
+        updated_at_utc=? WHERE id=? AND lease_owner=?`).run(new Date().toISOString(), jobId, owner);
+    });
+  }
 }
 
 if (import.meta.main) {
   const args = process.argv.slice(2);
-  if (args.length !== 2 || args[0] !== "--snapshot" || !args[1])
-    throw new Error("Usage: bun run scenarios:solve --snapshot KEY");
+  if ((args.length !== 2 && args.length !== 3) || args[0] !== "--snapshot" || !args[1] ||
+    (args.length === 3 && args[2] !== "--allow-historical-ties"))
+    throw new Error("Usage: bun run scenarios:solve --snapshot KEY [--allow-historical-ties]");
   const db = openDatabase(configFromEnv());
   try {
     await migrate(db);
@@ -154,7 +178,8 @@ if (import.meta.main) {
     console.log(JSON.stringify(solveSnapshot(db, args[1], {
       maxCompletions: number("SCENARIO_MAX_COMPLETIONS", 1000),
       maxRuntimeMs: number("SCENARIO_MAX_RUNTIME_MS", 5000),
-      maxTrackedPollPaths: number("SCENARIO_MAX_TRACKED_POLL_PATHS", 10000)
+      maxTrackedPollPaths: number("SCENARIO_MAX_TRACKED_POLL_PATHS", 10000),
+      allowHistoricalTies: args[2] === "--allow-historical-ties"
     }), null, 2));
   } finally { db.close(); }
 }
