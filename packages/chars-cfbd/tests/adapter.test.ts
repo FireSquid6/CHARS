@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { CfbdError, createClient, createTeamResolver, parseGames, parseRankings, parseTeams } from "../src/index";
+import { createClient, createTeamResolver, filterFbsGames, parseGames, parseRankings, parseTeams } from "../src/index";
 
 const game = { id: 100, season: 2026, week: 0, seasonType: "regular", startDate: "2026-08-29T20:00:00Z",
   completed: false, homeId: 1, awayId: 2, homeTeam: "Southern California", awayTeam: "Miami",
@@ -28,6 +28,14 @@ describe("schema and identity", () => {
     expect(() => parseGames([{ ...game, completed: true, awayPoints: null }], 2026)).toThrow("completed without scores");
     expect(() => parseGames([{ ...game, id: 0 }], 2026)).toThrow("invalid response");
   });
+  test("cancelled fixtures and contradictory status or notes cannot become final 0-0 ties", () => {
+    expect(parseGames([{ ...game, notes: "Game canceled", homePoints: 0, awayPoints: 0 }], 2026)[0]).toMatchObject({ completed: false, status: "cancelled" });
+    expect(parseGames([{ ...game, status: "postponed" }], 2026)[0]).toMatchObject({ completed: false, status: "postponed" });
+    expect(parseGames([{ ...game, completed: true, status: "cancelled" }], 2026)[0]).toMatchObject({ completed: false, status: "unknown" });
+    expect(parseGames([{ ...game, completed: true, notes: "Canceled" }], 2026)[0]).toMatchObject({ completed: false, status: "unknown" });
+    expect(parseGames([{ ...game, completed: true }], 2026)[0]).toMatchObject({ completed: true, status: "completed" });
+    expect(parseGames([game], 2026)[0]?.status).toBe("unknown");
+  });
   test("poll ties, unranked entries, release week and unknown publication time", () => {
     const weeks = parseRankings([{ season: 2026, seasonType: "regular", week: 7,
       polls: [{ poll: "AP Top 25", isFinal: false, ranks: [
@@ -55,6 +63,20 @@ describe("schema and identity", () => {
     expect(resolver.game(fixture).away).toMatchObject({ id: "cfbd:40", membership: "fcs" });
     expect(() => createTeamResolver([], [parseGames([game], 2026)[0]!])).toThrow("Missing season FBS roster");
   });
+  test("missing classification stays unknown; every game side is checked against membership", () => {
+    const fixture = parseGames([{ ...game, awayId: 40, awayTeam: "Unclassified", awayClassification: null }], 2026)[0]!;
+    const roster = parseTeams([team(1, "Southern California"), { ...team(2, "Miami"), classification: null }], 2026, new Set(["1"]));
+    expect(roster[1]?.membership).toBe("unknown");
+    const resolver = createTeamResolver(roster, [fixture]);
+    expect(resolver.game(fixture).away.membership).toBe("unknown");
+    expect(() => resolver.game(parseGames([{ ...game, awayClassification: "fcs" }], 2026)[0]!)).not.toThrow();
+    expect(() => resolver.game(parseGames([{ ...game, homeClassification: "fcs" }], 2026)[0]!)).toThrow("conflicts with season membership");
+    expect(() => createTeamResolver(roster, [parseGames([{ ...game, homeClassification: "fcs" }], 2026)[0]!])).toThrow("conflicts with season membership");
+    expect(resolver.game(parseGames([{ ...game, awayId: 40, awayTeam: "Unclassified", awayClassification: "fcs" }], 2026)[0]!).away.membership).toBe("fcs");
+    expect(() => resolver.game(parseGames([{ ...game, awayId: 40, awayTeam: "Unclassified", awayClassification: "fbs" }], 2026)[0]!)).toThrow("conflicts with season membership");
+    expect(() => parseTeams([team(1, "Southern California")], 2026, new Set())).toThrow("missing from season FBS roster");
+    expect(() => parseTeams([team(1, "Southern California", "fcs")], 2026, new Set(["1"]))).toThrow("FBS membership conflict");
+  });
 });
 
 describe("HTTP boundary", () => {
@@ -79,6 +101,35 @@ describe("HTTP boundary", () => {
     expect(seen[0]?.searchParams.get("seasonType")).toBe("both");
     expect(seen[4]?.searchParams.has("latest")).toBe(false);
     expect(seen.every(url => url.searchParams.get("year") === "2026" && !url.toString().includes("test-key"))).toBe(true);
+  });
+  test("merged game provenance keeps FCS-only raw and excludes FCS-FCS only after season roster filtering", async () => {
+    const fbsGame = { ...game, id: 201, awayId: 50, awayClassification: "fcs" };
+    const fcsGame = { ...game, id: 202, homeId: 50, awayId: 51, homeClassification: "fcs", awayClassification: "fcs" };
+    const client = createClient({ apiKey: "test-key", fetch: async (input, init) => {
+      expect(init?.headers).toMatchObject({ Authorization: "Bearer test-key" });
+      const classification = new URL(input instanceof Request ? input.url : input.toString()).searchParams.get("classification");
+      return Response.json(classification === "fbs" ? [game] : [fbsGame, fcsGame]);
+    } });
+    const merged = await client.games(2026);
+    expect(merged).not.toHaveProperty("raw");
+    expect(merged).not.toHaveProperty("sourceUrl");
+    expect(merged.sources).toHaveLength(2);
+    expect(merged.sources[0]?.sourceUrl).toContain("classification=fbs");
+    expect(merged.sources[1]?.sourceUrl).toContain("classification=fcs");
+    expect(merged.sources[1]?.raw).toEqual([fbsGame, fcsGame]);
+    expect(merged.items.find(item => item.id === "202")?.raw).toEqual(fcsGame);
+    expect(filterFbsGames(merged.items, new Set(["1", "2"])).map(item => item.id)).toEqual(["100", "201"]);
+  });
+  test("FBS endpoint and season roster disagreement fails closed", async () => {
+    const client = createClient({ apiKey: "test-key", fetch: mock({
+      "/teams/fbs": [team(1, "Southern California")],
+      "/teams": [team(1, "Southern California", "fcs")]
+    }) });
+    await expect(client.teams(2026)).rejects.toThrow("FBS membership conflict");
+    const omitted = createClient({ apiKey: "test-key", fetch: mock({
+      "/teams/fbs": [], "/teams": [team(1, "Southern California", "fbs")]
+    }) });
+    await expect(omitted.teams(2026)).rejects.toThrow("missing from season FBS roster");
   });
   test("bounded 429 retries honor Retry-After; no retry on authorization errors", async () => {
     let calls = 0;

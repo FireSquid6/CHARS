@@ -26,17 +26,32 @@ export function createTeamResolver(teams: readonly Team[], games: readonly Game[
       if (name) alias(name, team.id);
     }
   }
-  for (const game of games) {
-    for (const side of [
-      { id: game.homeId, name: game.homeTeam, classification: game.homeClassification },
-      { id: game.awayId, name: game.awayTeam, classification: game.awayClassification }
-    ]) {
-      if (byId.has(side.id)) continue;
-      if (side.classification?.toLowerCase() === "fbs") throw new Error(`Missing season FBS roster entry ${side.id}`);
-      byId.set(side.id, { id: `cfbd:${side.id}`, providerId: side.id, name: side.name, season: game.season,
-        membership: side.classification?.toLowerCase() === "fcs" ? "fcs" : "other", conference: null });
-      alias(side.name, side.id);
+  function checkSide(id: string, name: string, classification: string | null, season: number) {
+    const known = byId.get(id);
+    const sideMembership: Membership = classification === null ? "unknown" :
+      classification.toLowerCase() === "fbs" ? "fbs" :
+      classification.toLowerCase() === "fcs" ? "fcs" : "other";
+    if (known && known.season !== season) throw new Error(`Season membership mismatch for CFBD team ${id}`);
+    if (known && sideMembership !== "unknown" && known.membership !== "unknown" && known.membership !== sideMembership) {
+      throw new Error(`CFBD game classification conflicts with season membership for team ${id}`);
     }
+    if (known) {
+      if (known.membership === "unknown" && sideMembership !== "unknown") {
+        if (sideMembership === "fbs") throw new Error(`Missing season FBS roster entry ${id}`);
+        known.membership = sideMembership;
+      }
+      return known;
+    }
+    if (sideMembership === "fbs") throw new Error(`Missing season FBS roster entry ${id}`);
+    const identity: Identity = { id: `cfbd:${id}`, providerId: id, name, season,
+      membership: sideMembership, conference: null };
+    byId.set(id, identity);
+    alias(name, id);
+    return identity;
+  }
+  for (const game of games) {
+    checkSide(game.homeId, game.homeTeam, game.homeClassification, game.season);
+    checkSide(game.awayId, game.awayTeam, game.awayClassification, game.season);
   }
   return {
     byProviderId(id: string): Identity {
@@ -51,8 +66,8 @@ export function createTeamResolver(teams: readonly Team[], games: readonly Game[
       return this.byProviderId(id);
     },
     game(game: Game) {
-      const home = this.byProviderId(game.homeId), away = this.byProviderId(game.awayId);
-      if (home.season !== game.season || away.season !== game.season) throw new Error(`Season membership mismatch for game ${game.id}`);
+      const home = checkSide(game.homeId, game.homeTeam, game.homeClassification, game.season);
+      const away = checkSide(game.awayId, game.awayTeam, game.awayClassification, game.season);
       return { home, away };
     }
   };

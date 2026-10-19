@@ -2,11 +2,13 @@
 if (typeof window !== "undefined") throw new Error("chars-cfbd is server-only");
 export { createTeamResolver } from "./identity";
 
-export type Membership = "fbs" | "fcs" | "other";
+export type Membership = "fbs" | "fcs" | "other" | "unknown";
 export type Source<T> = { sourceUrl: string; observedAtUtc: string; raw: unknown; items: T[] };
+export type GameCollection = { items: Game[]; sources: [Source<Game>, Source<Game>] };
+export type GameStatus = "scheduled" | "in_progress" | "completed" | "cancelled" | "postponed" | "unknown";
 export type Game = {
   id: string; season: number; week: number; providerSeasonType: string;
-  kickoffUtc: string; completed: boolean; homeId: string; awayId: string;
+  kickoffUtc: string; completed: boolean; status: GameStatus; homeId: string; awayId: string;
   homeTeam: string; awayTeam: string; homePoints: number | null; awayPoints: number | null;
   homeClassification: string | null; awayClassification: string | null;
   playoff: unknown | null; notes: string | null; raw: Record<string, unknown>;
@@ -71,19 +73,43 @@ function distinct<T>(items: T[], key: (item: T) => string, context: string): T[]
   }
   return items;
 }
+function membership(classification: string | null): Membership {
+  if (classification === null) return "unknown";
+  const value = classification.toLowerCase();
+  return value === "fbs" || value === "fcs" ? value : "other";
+}
+function gameStatus(g: Record<string, unknown>, context: string, providerCompleted: boolean): GameStatus {
+  const providerStatus = g.status == null ? null : string(g.status, `${context}.status`).toLowerCase().trim();
+  const explicit: GameStatus | null = providerStatus === null ? null :
+    ["completed", "final"].includes(providerStatus) ? "completed" :
+    ["cancelled", "canceled"].includes(providerStatus) ? "cancelled" :
+    providerStatus === "postponed" ? "postponed" :
+    ["in_progress", "in progress"].includes(providerStatus) ? "in_progress" :
+    providerStatus === "scheduled" ? "scheduled" : "unknown";
+  const notes = g.notes == null ? "" : string(g.notes, `${context}.notes`);
+  const noteState: GameStatus | null = /\b(?:cancelled|canceled)\b/i.test(notes) ? "cancelled" :
+    /\bpostponed\b/i.test(notes) ? "postponed" : null;
+  // Notes are provisional, and provider status is not in the documented Game schema.
+  // Never promote a contradictory completed flag or a cancelled 0-0 to a final tie.
+  if ((explicit && explicit !== "unknown" && (explicit === "completed") !== providerCompleted) ||
+      (noteState && (providerCompleted || (explicit && explicit !== "unknown" && explicit !== noteState)))) return "unknown";
+  if (explicit === "unknown") return "unknown";
+  return explicit ?? noteState ?? (providerCompleted ? "completed" : "unknown");
+}
 export function parseGames(raw: unknown, year: number): Game[] {
   return distinct(list(raw, "games").map((value, index) => {
     const context = `games[${index}]`, g = object(value, context);
     const homeId = String(integer(g.homeId, `${context}.homeId`, 1));
     const awayId = String(integer(g.awayId, `${context}.awayId`, 1));
     if (homeId === awayId) invalid(`${context}: identical teams`);
-    const completed = boolean(g.completed, `${context}.completed`);
+    const providerCompleted = boolean(g.completed, `${context}.completed`);
+    const status = gameStatus(g, context, providerCompleted);
     const homePoints = optionalInt(g.homePoints, `${context}.homePoints`);
     const awayPoints = optionalInt(g.awayPoints, `${context}.awayPoints`);
-    if (completed && (homePoints === null || awayPoints === null)) invalid(`${context}: completed without scores`);
+    if (status === "completed" && (homePoints === null || awayPoints === null)) invalid(`${context}: completed without scores`);
     return { id: String(integer(g.id, `${context}.id`, 1)), season: season(g.season, year, context),
       week: integer(g.week, `${context}.week`), providerSeasonType: seasonType(g.seasonType, `${context}.seasonType`),
-      kickoffUtc: date(g.startDate, `${context}.startDate`), completed, homeId, awayId,
+      kickoffUtc: date(g.startDate, `${context}.startDate`), completed: status === "completed", status, homeId, awayId,
       homeTeam: string(g.homeTeam, `${context}.homeTeam`), awayTeam: string(g.awayTeam, `${context}.awayTeam`),
       homePoints, awayPoints, homeClassification: optionalString(g.homeClassification, `${context}.homeClassification`),
       awayClassification: optionalString(g.awayClassification, `${context}.awayClassification`),
@@ -96,11 +122,12 @@ export function parseTeams(raw: unknown, year: number, fbsIds: ReadonlySet<strin
     const id = String(integer(t.id, `${context}.id`, 1));
     const classification = optionalString(t.classification, `${context}.classification`);
     if (fbsIds.has(id) && classification && classification.toLowerCase() !== "fbs") invalid(`${context}: FBS membership conflict`);
+    if (!fbsIds.has(id) && membership(classification) === "fbs") invalid(`${context}: missing from season FBS roster`);
     return { id, school: string(t.school, `${context}.school`),
       abbreviation: optionalString(t.abbreviation, `${context}.abbreviation`),
       alternateNames: t.alternateNames == null ? [] : list(t.alternateNames, `${context}.alternateNames`).map((n, i) => string(n, `${context}.alternateNames[${i}]`)),
       conference: optionalString(t.conference, `${context}.conference`), classification,
-      membership: fbsIds.has(id) ? "fbs" : classification?.toLowerCase() === "fcs" ? "fcs" : "other", season: year };
+      membership: fbsIds.has(id) ? "fbs" : membership(classification), season: year };
   }), t => t.id, "teams");
 }
 export function parseRankings(raw: unknown, year: number): PollWeek[] {
@@ -183,11 +210,15 @@ export function createClient(options: ClientOptions = {}) {
         if (previous && JSON.stringify(previous.raw) !== JSON.stringify(game.raw)) throw new CfbdError(`CFBD conflicting classification payload for game ${game.id}`);
         games.set(game.id, game);
       }
-      return { ...fbs, items: [...games.values()], sources: [fbs, fcs] };
+      return { items: [...games.values()], sources: [fbs, fcs] } satisfies GameCollection;
     },
     async teams(year: number) {
       const y = yearParam(year);
-      const fbs = await request("/teams/fbs", { year: y }, raw => parseTeams(raw, year, new Set()));
+      const fbs = await request("/teams/fbs", { year: y }, raw => {
+        const ids = new Set(list(raw, "FBS teams").map((value, index) =>
+          String(integer(object(value, `FBS teams[${index}]`).id, `FBS teams[${index}].id`, 1))));
+        return parseTeams(raw, year, ids);
+      });
       const ids = new Set(fbs.items.map(team => team.id));
       const all = await request("/teams", { year: y }, raw => parseTeams(raw, year, ids));
       if (ids.size !== fbs.items.length || [...ids].some(id => !all.items.some(team => team.id === id))) throw new CfbdError("CFBD FBS roster conflicts with season teams");
@@ -196,4 +227,9 @@ export function createClient(options: ClientOptions = {}) {
     rankings(year: number) { return request("/rankings", { year: yearParam(year), seasonType: "both" }, raw => parseRankings(raw, year)); },
     calendar(year: number) { return request("/calendar", { year: yearParam(year) }, raw => parseCalendar(raw, year)); }
   };
+}
+
+/** Apply only after the season's FBS roster has been fetched and checked for coverage. */
+export function filterFbsGames(games: readonly Game[], fbsIds: ReadonlySet<string>): Game[] {
+  return games.filter(game => fbsIds.has(game.homeId) || fbsIds.has(game.awayId));
 }
