@@ -1,4 +1,4 @@
-import { MODEL_VERSION, POLICY_VERSION, type RecordStats, type SnapshotIdentity,
+import { CALENDAR_POLICY_VERSION, MODEL_VERSION, POLICY_VERSION, type RecordStats, type SnapshotIdentity,
   type SelectionCategory, type SelectionRoute } from "./index";
 import { selectField, type SelectionInput, type SelectionResult, type SelectionSwap } from "./selection";
 import type { HeadToHeadEdge } from "./head-to-head";
@@ -26,6 +26,9 @@ export interface SeedingResult {
   snapshot: SnapshotIdentity | null;
   policyVersion: typeof POLICY_VERSION;
   modelVersion: typeof MODEL_VERSION;
+  calendarPolicyVersion: typeof CALENDAR_POLICY_VERSION;
+  /** Completeness/publication checks belong to snapshot construction (step 7), not this pure engine. */
+  publicationStatus: { state: "incomplete" | "provisional"; reason: string };
   cycleFallback: "original_full_fbs_scc_colley_chain";
   selection: SelectionResult;
   /** Includes eligible outsiders and ineligible FBS teams, not only seeded participants. */
@@ -47,7 +50,14 @@ const compareIds = (a: string, b: string): number => a < b ? -1 : a > b ? 1 : 0;
 
 /** Calculate the adjusted order without reassigning the selection result's category labels. */
 export function seedField(input: SelectionInput, snapshot: SnapshotIdentity | null = null): SeedingResult {
-  if (snapshot && snapshot.season !== input.season) throw new Error("Snapshot season does not match seeding input");
+  if (snapshot) {
+    if (snapshot.season !== input.season) throw new Error("Snapshot season does not match seeding input");
+    if (snapshot.policyVersion !== POLICY_VERSION) throw new Error("Snapshot policyVersion does not match seeding policy");
+    if (snapshot.modelVersion !== MODEL_VERSION) throw new Error("Snapshot modelVersion does not match Colley model");
+    if (snapshot.calendarPolicyVersion !== CALENDAR_POLICY_VERSION) {
+      throw new Error("Snapshot calendarPolicyVersion does not match selection calendar");
+    }
+  }
   const selection = selectField(input);
   const selected = new Set([...selection.bid, ...selection.playin]);
   const compare = input.ratings.compareTeamIds;
@@ -110,7 +120,13 @@ export function seedField(input: SelectionInput, snapshot: SnapshotIdentity | nu
       finalCategory: category.finalCategory, precisionMethod: rating.precisionMethod,
       residual: rating.residual };
   });
+  const publicationStatus: SeedingResult["publicationStatus"] = snapshot ? {
+    state: "provisional", reason: "Snapshot completeness and publication are not validated here; " +
+      "step 7 must verify coverage, cutoffs, and source revisions before declaring a final bracket."
+  } : { state: "incomplete", reason: "No snapshot identity or validated completeness metadata was supplied; " +
+    "this synthetic bracket cannot be published as final." };
   return { season: input.season, snapshot, policyVersion: POLICY_VERSION, modelVersion: MODEL_VERSION,
+    calendarPolicyVersion: CALENDAR_POLICY_VERSION, publicationStatus,
     cycleFallback: "original_full_fbs_scc_colley_chain", selection, teams, edges,
     rankings, cyclicGroups, adjustedOrder, cycleEdges: selection.graph.suppressedEdges,
     swaps: selection.swaps };

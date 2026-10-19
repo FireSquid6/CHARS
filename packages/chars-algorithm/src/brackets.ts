@@ -39,6 +39,7 @@ export interface MainMatch {
 
 export interface BracketResult {
   seeding: SeedingResult;
+  publicationStatus: SeedingResult["publicationStatus"];
   playinPairs: PlayinPair[];
   playinByeTeamId: string | null;
   mainSlots: MainSlot[];
@@ -74,29 +75,41 @@ export function buildBracket(seeding: SeedingResult): BracketResult {
   const bids = [...seeding.selection.bid].sort(byRank);
   const playin = [...seeding.selection.playin].sort(byRank);
   const playinByeTeamId = playin.length % 2 ? playin.shift()! : null;
-  const playinPairs: PlayinPair[] = [];
+  const pairDrafts: Omit<PlayinPair, "winnerSlotId">[] = [];
   for (let i = 0; i < playin.length / 2; i++) {
     const teamAId = playin[i]!, teamBId = playin[playin.length - 1 - i]!;
     const id = `playin-${i + 1}`;
-    playinPairs.push({ id, teamAId, teamBId,
+    pairDrafts.push({ id, teamAId, teamBId,
       teamAAdjustedRank: rank.get(teamAId)!.adjustedRank,
-      teamBAdjustedRank: rank.get(teamBId)!.adjustedRank,
-      winnerSlotId: `slot-${id}` });
+      teamBAdjustedRank: rank.get(teamBId)!.adjustedRank });
   }
-  type SlotDraft = Omit<MainSlot, "seed">;
+  type SlotDraft = Omit<MainSlot, "seed" | "id">;
   const singleton = (teamId: string, source: "bid" | "playin_bye"): SlotDraft => ({
-    id: `slot-${teamId}`, priorityAdjustedRank: rank.get(teamId)!.adjustedRank,
+    priorityAdjustedRank: rank.get(teamId)!.adjustedRank,
     source, teamId, teamAId: teamId, teamBId: null, label: teamId, playinPairId: null });
   const drafts: SlotDraft[] = [
     ...bids.map(id => singleton(id, "bid")),
     ...(playinByeTeamId ? [singleton(playinByeTeamId, "playin_bye")] : []),
-    ...playinPairs.map(pair => ({ id: pair.winnerSlotId, priorityAdjustedRank: pair.teamAAdjustedRank,
+    ...pairDrafts.map(pair => ({ priorityAdjustedRank: pair.teamAAdjustedRank,
       source: "playin_winner" as const, teamId: null, teamAId: pair.teamAId,
       teamBId: pair.teamBId, label: `${pair.teamAId} / ${pair.teamBId}`,
       playinPairId: pair.id }))
   ];
   drafts.sort((a, b) => a.priorityAdjustedRank - b.priorityAdjustedRank);
-  const mainSlots: MainSlot[] = drafts.map((slot, index) => ({ ...slot, seed: index + 1 }));
+  // Keep slot IDs disjoint from every team and pair ID, including adversarial names.
+  const reservedIds = new Set([...seeding.rankings.map(team => team.teamId), ...pairDrafts.map(pair => pair.id)]);
+  const mainSlots: MainSlot[] = drafts.map((slot, index) => {
+    const seed = index + 1;
+    const base = `main-slot-${seed}`;
+    let id = base, suffix = 1;
+    while (reservedIds.has(id)) id = `${base}-${suffix++}`;
+    reservedIds.add(id);
+    return { ...slot, id, seed };
+  });
+  const pairSlots = new Map(mainSlots.filter(slot => slot.playinPairId !== null)
+    .map(slot => [slot.playinPairId!, slot.id]));
+  const playinPairs: PlayinPair[] = pairDrafts.map(pair => ({ ...pair,
+    winnerSlotId: pairSlots.get(pair.id)! }));
   const count = mainSlots.length;
   const bracketSize = count < 2 ? count : 2 ** Math.ceil(Math.log2(count));
   const seedPositions = standardSeedOrder(bracketSize);
@@ -123,7 +136,8 @@ export function buildBracket(seeding: SeedingResult): BracketResult {
     `Only ${seeding.selection.bid.length + seeding.selection.playin.length} eligible teams were selected: ` +
     "rating/minimum-bid routes and the available eligible contemporaneous poll entries did not reach 12; " +
     "no eligibility, poll, or parity invitations were fabricated." : null;
-  return { seeding, playinPairs, playinByeTeamId, mainSlots, bracketSize, seedPositions,
+  return { seeding, publicationStatus: seeding.publicationStatus,
+    playinPairs, playinByeTeamId, mainSlots, bracketSize, seedPositions,
     rounds, champion: entries[0] ?? null, bracketPolicy: "fixed_winner_slots_highest_seeds_byes",
     counts: { initialBid: seeding.selection.initialBid.length,
       initialPlayin: seeding.selection.initialPlayin.length,

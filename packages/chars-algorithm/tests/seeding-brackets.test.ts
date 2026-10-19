@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { colleyInputFingerprint, computeEligibility, computePlayoff, seedField, standardSeedOrder } from "../src/index";
+import { CALENDAR_POLICY_VERSION, MODEL_VERSION, POLICY_VERSION, colleyInputFingerprint,
+  computeEligibility, computePlayoff, seedField, standardSeedOrder } from "../src/index";
 import type { ColleyResult } from "../src/colley";
-import type { Game, TeamSeason } from "../src/index";
+import type { Game, Snapshot, TeamSeason } from "../src/index";
 import type { SelectionInput } from "../src/selection";
 
 const season = 2026;
@@ -29,6 +30,28 @@ function fixture(ratings: Record<string, number>, edges: [string, string][] = []
 }
 
 describe("adjusted seeding order", () => {
+  test("rejects mismatched snapshot policy, model, calendar or season", () => {
+    const input = fixture({ A: .95 });
+    const snapshot = { key: "2026-final", season, revision: 1, inputHash: "fixture",
+      policyVersion: POLICY_VERSION, modelVersion: MODEL_VERSION,
+      calendarPolicyVersion: CALENDAR_POLICY_VERSION };
+    for (const [field, error] of [
+      ["policyVersion", /policyVersion/], ["modelVersion", /modelVersion/],
+      ["calendarPolicyVersion", /calendarPolicyVersion/], ["season", /season/]
+    ] as const) {
+      expect(() => computePlayoff(input, { ...snapshot, [field]: field === "season" ? 2025 : "other" }))
+        .toThrow(error);
+    }
+    expect(computePlayoff(input, snapshot).publicationStatus.state).toBe("provisional");
+    expect(computePlayoff(input).publicationStatus.state).toBe("incomplete");
+    const published: Snapshot = { ...snapshot, kind: "selection_final", week: 13,
+      gameCutoffUtc: "2026-11-30T00:00:00Z", pollCutoffUtc: null, pollReleaseId: null,
+      coverage: "unknown", publishedAtUtc: "2026-12-01T00:00:00Z" };
+    const result = computePlayoff(input, published);
+    expect(result.publicationStatus).toMatchObject({ state: "provisional" });
+    expect(result.publicationStatus.reason).toContain("step 7");
+  });
+
   test("real chain constraints override raw rank without changing final bid and play-in labels", () => {
     const input = fixture({ C: .97, D: .96, E: .95, F: .94, B: .87, A: .7 },
       [["A", "B"], ["B", "C"]]);
@@ -125,9 +148,46 @@ describe("fixed bracket", () => {
     const one = computePlayoff(fixture({ A: .95 }));
     expect(one.mainSlots).toHaveLength(1);
     expect(one.rounds).toEqual([]);
-    expect(one.champion).toEqual({ kind: "slot", slotId: "slot-A" });
+    expect(one.champion).toEqual({ kind: "slot", slotId: "main-slot-1" });
     const three = computePlayoff(fixture({ A: .95, B: .94, C: .93 }));
     expect(three.counts.bid).toBe(3);
     expect(three.rounds[0]?.filter(m => m.isBye)).toHaveLength(1);
+  });
+
+  test("all main slot IDs stay distinct for arbitrary team names including play-in pair identifiers", () => {
+    const r = computePlayoff(fixture({ "playin-1": .98, "slot-playin-1": .97,
+      "main-slot-1": .96, D: .95, E: .88, F: .87, G: .86, H: .85 }));
+    expect(r.playinPairs).toHaveLength(2);
+    expect(r.mainSlots).toHaveLength(6);
+    expect(new Set(r.mainSlots.map(slot => slot.id)).size).toBe(r.mainSlots.length);
+    expect(r.mainSlots.every(slot => !r.seeding.rankings.some(team => team.teamId === slot.id))).toBe(true);
+    expect(r.mainSlots.every(slot => !r.playinPairs.some(pair => pair.id === slot.id))).toBe(true);
+    expect(r.playinPairs.map(pair => pair.winnerSlotId)).toEqual(
+      r.mainSlots.filter(slot => slot.source === "playin_winner").map(slot => slot.id));
+    expect(r.mainSlots.find(slot => slot.teamId === "playin-1")?.id)
+      .not.toBe(r.playinPairs[0]?.winnerSlotId);
+    for (const match of r.rounds.flat()) for (const entry of [match.first, match.second]) {
+      if (entry?.kind === "slot") expect(r.mainSlots.some(slot => slot.id === entry.slotId)).toBe(true);
+    }
+  });
+
+  test("mixed bids and play-in winners use provisional adjusted priorities at eight and sixteen", () => {
+    for (const playinCount of [8, 10]) {
+      const ratings = Object.fromEntries(Array.from({ length: 4 + playinCount }, (_, i) =>
+        [`T${String(i).padStart(2, "0")}`, i < 4 ? .99 - i * .01 : .89 - (i - 4) * .002]));
+      const r = computePlayoff(fixture(ratings));
+      expect(r.counts).toMatchObject({ bid: 4, playin: playinCount,
+        mainSlots: 4 + playinCount / 2 });
+      expect(r.bracketSize).toBe(playinCount === 8 ? 8 : 16);
+      expect(r.mainSlots.map(slot => slot.priorityAdjustedRank))
+        .toEqual(playinCount === 8 ? [1, 2, 3, 4, 5, 6, 7, 8] : [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+      for (const pair of r.playinPairs) {
+        const slot = r.mainSlots.find(s => s.id === pair.winnerSlotId)!;
+        expect(slot.seed).toBe(pair.teamAAdjustedRank);
+        expect(slot.teamBId).toBe(pair.teamBId);
+        expect(slot.teamId).toBeNull();
+      }
+      expect(r.rounds[0]?.filter(m => m.isBye)).toHaveLength(r.bracketSize - r.mainSlots.length);
+    }
   });
 });
