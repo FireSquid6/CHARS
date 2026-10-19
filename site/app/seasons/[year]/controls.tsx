@@ -1,9 +1,10 @@
 "use client";
 
 import type { SnapshotOption } from "@/lib/season-data";
+import type { StatusLabel } from "@/lib/weekly-status";
 
-export function SnapshotControls({ base, options, selected, search, view }: {
-  base: string; options: SnapshotOption[]; selected: string | undefined; search: string; view: string;
+export function SnapshotControls({ base, options, selected, search, view, status }: {
+  base: string; options: SnapshotOption[]; selected: string | undefined; search: string; view: string; status: StatusLabel | null;
 }) {
   const label = (option: SnapshotOption) => option.kind === "selection_final" ? "Final selection (pre-CCG)" :
     option.key.endsWith(":preseason") ? "Preseason" : `Week ${option.week}${option.kind === "partial" ? " · partial" : " · complete"}`;
@@ -13,12 +14,15 @@ export function SnapshotControls({ base, options, selected, search, view }: {
     if (key) params.set("week", key);
     if (search) params.set("q", search);
     if (view === "eligible") params.set("view", view);
+    if (status && (key ? options.find(option => option.key === key)?.kind !== "selection_final" :
+      options.find(option => option.publicationState === "current")?.kind !== "selection_final")) params.set("status", status);
     return `${base}${params.size ? `?${params}` : ""}`;
   };
   return <div className="controls" aria-label="Snapshot navigation">
     <form action={base} method="get" className="controls-form">
       {search && <input type="hidden" name="q" value={search} />}
       {view === "eligible" && <input type="hidden" name="view" value={view} />}
+      {status && <input type="hidden" name="status" value={status} />}
       <label htmlFor="week">Snapshot</label><select id="week" name="week" defaultValue={selected ?? ""}>
         {!selected && <option value="" disabled>Choose a published snapshot</option>}
         {options.map(option => <option key={option.key} value={option.key}>{label(option)}{option.publicationState !== "current" ? ` · ${option.publicationState}` : ""}</option>)}
@@ -32,11 +36,12 @@ export function SnapshotControls({ base, options, selected, search, view }: {
   </div>;
 }
 
-export function RankingControls({ base, week, search, eligibleOnly }: {
-  base: string; week?: string; search: string; eligibleOnly: boolean;
+export function RankingControls({ base, week, search, eligibleOnly, status }: {
+  base: string; week?: string; search: string; eligibleOnly: boolean; status: StatusLabel | null;
 }) {
   return <div className="controls"><form action={base} method="get" role="search" className="controls-form">
     {week && <input type="hidden" name="week" value={week} />}
+    {status && <input type="hidden" name="status" value={status} />}
     <label htmlFor="team-search">Find a team</label><input id="team-search" type="search" name="q" defaultValue={search} placeholder="Team name or abbreviation" />
     <label htmlFor="view">Teams</label><select id="view" name="view" defaultValue={eligibleOnly ? "eligible" : "all"}>
       <option value="all">All FBS (including ineligible)</option><option value="eligible">Eligible only</option>

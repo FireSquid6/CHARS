@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { bracketView, type BracketRow, type BracketView } from "./bracket-view";
+import { readWeeklyStatuses, type WeeklyStatuses } from "./weekly-status";
 
 export type SeasonState = "preseason" | "current" | "final" | "incomplete";
 export type SeasonCard = { year: number; state: SeasonState; detail: string };
@@ -24,8 +25,8 @@ export function filterRankings(rankings: Ranking[], search: string, eligibleOnly
 export type Swap = { sequence: number; winner: string; loser: string; supportingGameIds: string[];
   winnerBefore: string; loserBefore: string };
 export type SeasonData = { year: number; state: SeasonState; options: SnapshotOption[]; snapshot: SnapshotOption | null;
-  rankings: Ranking[]; swaps: Swap[]; bracket: BracketView | null; bracketIssue: string | null;
-  issue: string | null; lastSync: string | null; pending: boolean };
+   rankings: Ranking[]; swaps: Swap[]; bracket: BracketView | null; bracketIssue: string | null;
+   issue: string | null; lastSync: string | null; pending: boolean; statuses: WeeklyStatuses };
 
 type DbSnapshot = { snapshot_key: string; revision: number; week: number | null; kind: SnapshotOption["kind"];
   game_cutoff_utc: string; poll_cutoff_utc: string | null; published_at_utc: string;
@@ -150,7 +151,7 @@ export function getHomeData(now = new Date()): { seasons: SeasonCard[]; setup: s
 export function getSeasonData(year: number, requestedWeek?: string): SeasonData {
   const { db, issue } = openReadOnly();
   const empty = (message: string): SeasonData => ({ year, state: year === currentFootballSeason() ? "preseason" : "incomplete",
-    options: [], snapshot: null, rankings: [], swaps: [], bracket: null, bracketIssue: null, issue: message, lastSync: null, pending: false });
+    options: [], snapshot: null, rankings: [], swaps: [], bracket: null, bracketIssue: null, issue: message, lastSync: null, pending: false, statuses: {} });
   if (!db) return empty(issue ?? "Database unavailable");
   try {
     // One consistent WAL read: ranking rows and the pointer always refer to the same publication.
@@ -198,9 +199,12 @@ export function getSeasonData(year: number, requestedWeek?: string): SeasonData 
              "Published round-zero bracket slots are missing for this revision; no matchup is inferred.";
          }
        }
-      const sync = db.query<{ ended_at_utc: string }, []>("SELECT ended_at_utc FROM sync_runs WHERE state='success' ORDER BY ended_at_utc DESC LIMIT 1").get();
-      return { year, state: seasonState(year, options, seasonFromCalendar(db, new Date())), options, snapshot,
-          rankings: rankings.map(row => ({ ...row, eligible: Boolean(row.eligible) })), swaps, bracket, bracketIssue,
+       const sync = db.query<{ ended_at_utc: string }, []>("SELECT ended_at_utc FROM sync_runs WHERE state='success' ORDER BY ended_at_utc DESC LIMIT 1").get();
+       const typedRankings = rankings.map(row => ({ ...row, eligible: Boolean(row.eligible) }));
+       const statuses = snapshot?.kind !== "selection_final" && snapshot ?
+         readWeeklyStatuses(db, year, snapshot, typedRankings) : {};
+       return { year, state: seasonState(year, options, seasonFromCalendar(db, new Date())), options, snapshot,
+           rankings: typedRankings, swaps, bracket, bracketIssue, statuses,
         issue: requestedWeek !== undefined && !selected ? "That snapshot key is not published for this season." :
           !snapshot ? "No published snapshot for this season. Backfill and rebuild snapshots before viewing rankings." : null,
         lastSync: sync?.ended_at_utc ?? null, pending };

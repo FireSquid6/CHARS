@@ -50,6 +50,21 @@ td.explanation { white-space: normal; min-width: 210px; }
 .status-pending { padding: .75rem 1rem; border: 1px solid var(--line); border-radius: .5rem; }
 .status-pending h2 { font-size: 1.1rem; margin: 0; }
 .status-pending p { margin: .35rem 0 0; }
+.status-panel { padding: 1rem; border: 1px solid var(--line); border-radius: .5rem; margin: 1.25rem 0; background: #fff; }
+.status-panel h2 { font-size: 1.25rem; margin: 0; }
+.status-panel p { margin: .5rem 0; }
+.status-bubbles { display: flex; flex-wrap: wrap; gap: .65rem; margin: 1rem 0; }
+.status-bubble { display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 130px; min-height: 76px; padding: .5rem; border: 2px solid var(--line); border-radius: 1.5rem; color: var(--ink); background: #f6f8f6; text-decoration: none; text-align: center; }
+.status-bubble strong { font-size: 1.5rem; }
+.status-bubble:hover, .status-bubble.active { border-color: var(--accent); text-decoration: underline; }
+.status-eliminated, .status-bubble.eliminated { background: #f4dfe0; color: #712b32; }
+.status-needs_help, .status-bubble.needs_help { background: #fff0cd; color: #644515; }
+.status-controls_destiny, .status-bubble.controls_destiny { background: #e0e9fa; color: #263f79; }
+.status-clinched, .status-bubble.clinched { background: #d6eee5; color: #145343; }
+.status-cell { white-space: normal; min-width: 200px; }
+.team-status details { max-width: 320px; }
+.team-status summary { cursor: pointer; color: var(--accent); text-decoration: underline; }
+.team-status p { white-space: normal; overflow-wrap: anywhere; }
 .bracket { margin: 2rem 0; }
 .bracket h3 { margin-top: 1.5rem; }
 .bracket-rounds { display: flex; gap: 1rem; overflow-x: auto; padding-bottom: 1rem; }
@@ -73,9 +88,11 @@ td.explanation { white-space: normal; min-width: 210px; }
 }
 @media (prefers-color-scheme: dark) {
   :root { color-scheme: dark; --ink: #e8f0ed; --muted: #b6c8c4; --bg: #122022; --line: #516866; --accent: #9bded2; }
-  .season-card, .controls, .table-wrap, .match-card { background: #1e3031; color: var(--ink); }
+  .season-card, .controls, .table-wrap, .match-card, .status-panel { background: #1e3031; color: var(--ink); }
   .rules, thead, .badge { background: #294340; color: #e8f0ed; }
   .badge.final, .badge.bid, .badge.current, .badge.playin, .badge.incomplete, .badge.stale, .badge.pending, .seed { background: #294340; color: #e8f0ed; }
+  .status-bubble, .status-bubble.eliminated, .status-bubble.needs_help, .status-bubble.controls_destiny, .status-bubble.clinched,
+  .badge.status-eliminated, .badge.status-needs_help, .badge.status-controls_destiny, .badge.status-clinched { background: #294340; color: #e8f0ed; }
   tbody tr:nth-child(even) { background: #243838; }
   th, td { border-color: var(--line); }
   .notice { background: #493625; color: #fff0d9; }

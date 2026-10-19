@@ -3,6 +3,8 @@ import { notFound } from "next/navigation";
 import { filterRankings, getSeasonData, supportedYears, type Ranking, type SnapshotOption } from "@/lib/season-data";
 import { Bracket } from "./bracket";
 import { RankingControls, SnapshotControls } from "./controls";
+import { filterByStatus, statusFilter } from "@/lib/weekly-status";
+import { StatusBubbles, TeamStatusCell } from "./weekly-status";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,7 +31,7 @@ function formatDate(value: string) {
 
 export default async function SeasonPage({ params, searchParams }: {
   params: Promise<{ year: string }>;
-  searchParams: Promise<{ week?: string; q?: string; view?: string }>;
+   searchParams: Promise<{ week?: string; q?: string; view?: string; status?: string }>;
 }) {
   const { year: yearText } = await params;
   const year = Number(yearText);
@@ -40,7 +42,8 @@ export default async function SeasonPage({ params, searchParams }: {
   const selected = data.snapshot;
   const search = typeof query.q === "string" ? query.q.trim().slice(0, 100) : "";
   const eligibleOnly = query.view === "eligible";
-  const visible = filterRankings(data.rankings, search, eligibleOnly);
+  const status = selected?.kind === "selection_final" ? null : statusFilter(query.status);
+  const visible = filterByStatus(filterRankings(data.rankings, search, eligibleOnly), data.statuses, status);
   const names = new Map(data.rankings.map(team => [team.teamId, team.name]));
   const base = `/seasons/${year}`;
   return (
@@ -57,7 +60,7 @@ export default async function SeasonPage({ params, searchParams }: {
         {!process.env.CFBD_API_KEY && <p>Set CFBD_API_KEY on the server to ingest data; no historical rankings are inferred without stored results.</p>}</aside>}
       {data.pending && <aside className="notice" role="status"><strong>Update pending</strong>
         <p>New source data are awaiting a validated snapshot. Displayed results, if any, are the last published revision.</p></aside>}
-      {data.options.length > 0 && <SnapshotControls base={base} options={data.options} selected={selected?.key} search={search} view={eligibleOnly ? "eligible" : "all"} />}
+       {data.options.length > 0 && <SnapshotControls base={base} options={data.options} selected={selected?.key} search={search} view={eligibleOnly ? "eligible" : "all"} status={status} />}
       {selected && <>
         <div className="summary"><span>Games through {formatDate(selected.gameCutoff)}</span>
           <span>· Published {formatDate(selected.publishedAt)}</span>
@@ -73,22 +76,23 @@ export default async function SeasonPage({ params, searchParams }: {
           <p><strong>Selection:</strong> Teams need at least .750 regular-season winning percentage and at least one game. Ratings ≥ .90 earn initial direct bids; if fewer than four, the next eligible teams fill the minimum four. Remaining eligible teams ≥ .85 enter play-ins; contemporaneous AP/CFP poll entries fill toward twelve when available. The field may be short.</p>
           <p>Head-to-head swaps can move teams between categories without changing their Colley rating. No single rating line describes the final field. Ties count as half a win; FCS wins count toward eligibility but not the FBS-only Colley matrix.</p>
         </section>
-        {selected.kind !== "selection_final" && <section className="status-pending" aria-label="Mathematical status pending">
-          <h2>Playoff status · pending computation</h2><p>Eliminated · Needs help · Controls destiny · Clinched: no mathematical classifications are published for this snapshot. Provisional selections below are not elimination or clinch proofs.</p>
-        </section>}
+         {selected.kind !== "selection_final" && <StatusBubbles base={base} week={selected.key} search={search}
+           view={eligibleOnly ? "eligible" : "all"} active={status} statuses={data.statuses} total={data.rankings.length} />}
         {data.bracket && <Bracket bracket={data.bracket} stale={selected.publicationState === "stale"} />}
         {data.bracketIssue && <aside className="notice" role="status"><strong>Bracket unavailable</strong><p>{data.bracketIssue} Rankings and snapshot controls remain available.</p></aside>}
         <section aria-labelledby="ranking-title">
           <div className="section-head"><h2 id="ranking-title">{eligibleOnly ? "Eligible FBS rankings" : "All FBS teams"}</h2><span>{visible.length} shown · {data.rankings.length} FBS teams</span></div>
-          <RankingControls base={base} week={selected.key} search={search} eligibleOnly={eligibleOnly} />
+           <RankingControls base={base} week={selected.key} search={search} eligibleOnly={eligibleOnly} status={status} />
           <div className="table-wrap" role="region" aria-label="Scrollable FBS rankings" tabIndex={0}>
             <table><caption className="sr-only">Published Colley rankings and selection categories</caption>
               <thead><tr><th scope="col">Raw rank</th><th scope="col">Team</th><th scope="col">Adjusted</th><th scope="col">Rating</th>
-                <th scope="col">W–L–T</th><th scope="col">Pct</th><th scope="col">Selection category</th><th scope="col">Initial route / reason</th></tr></thead>
+                 <th scope="col">W–L–T</th><th scope="col">Pct</th>{selected.kind !== "selection_final" && <th scope="col">Playoff status</th>}
+                 <th scope="col">Selection category</th><th scope="col">Initial route / reason</th></tr></thead>
               <tbody>{visible.map(team => <tr key={team.teamId}>
                 <td>{team.colleyRank}</td><th scope="row" className="team">{team.name}{team.abbreviation && <span className="subtle"> ({team.abbreviation})</span>}</th>
                 <td>{team.adjustedRank ?? "—"}</td><td>{team.rating.toFixed(6)}</td>
-                <td>{team.wins}–{team.losses}–{team.ties}</td><td>{percentage(team)}</td>
+                 <td>{team.wins}–{team.losses}–{team.ties}</td><td>{percentage(team)}</td>
+                 {selected.kind !== "selection_final" && <td className="status-cell"><TeamStatusCell team={team} status={data.statuses[team.teamId]} names={names} /></td>}
                  <td><span className={`badge ${team.finalCategory}`}>{selected.kind === "selection_final" && selected.coverage.complete ? selected.publicationState === "stale" ? "Retained final · " : selected.publicationState === "current" ? "Final · " : "Provisional · " : "Provisional · "}{team.finalCategory === "playin" ? "Play-in" : team.finalCategory === "bid" ? "Direct bid" : "Outside"}</span></td>
                 <td className="explanation">{routeLabels[team.originalRoute] ?? team.originalRoute}{!team.eligible ? ` · ${team.eligibilityReason ?? "Below .750"}` : ""}</td>
               </tr>)}</tbody>
