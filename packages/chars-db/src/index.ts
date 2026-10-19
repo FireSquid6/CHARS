@@ -21,9 +21,18 @@ export function openDatabase(config: DatabaseConfig): Database {
   if (!Number.isSafeInteger(timeout) || timeout < 0 || timeout > 60000) throw new Error("Invalid SQLite busy timeout");
   const db = new Database(config.path, { create: true, strict: true });
   try {
-    db.exec("PRAGMA journal_mode = WAL");
-    db.exec("PRAGMA foreign_keys = ON");
     db.exec(`PRAGMA busy_timeout = ${timeout}`);
+    const deadline = Date.now() + timeout;
+    for (;;) {
+      try {
+        db.exec("PRAGMA journal_mode = WAL");
+        break;
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "SQLITE_BUSY") || Date.now() >= deadline) throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(25, deadline - Date.now()));
+      }
+    }
+    db.exec("PRAGMA foreign_keys = ON");
     return db;
   } catch (error) {
     db.close();
@@ -73,7 +82,7 @@ export function createRepository(db: Database) {
   const games = prepareRows<Game, [number]>(db,
     "SELECT id, provider_game_id AS providerGameId, season, week, home_team_id AS homeTeamId, away_team_id AS awayTeamId, kickoff_utc AS kickoffUtc, home_score AS homeScore, away_score AS awayScore, status, completed, provider_season_type AS providerSeasonType, application_game_type AS applicationGameType, classification_source AS classificationSource, payload_hash AS payloadHash, result_revision AS resultRevision FROM games WHERE season = ? ORDER BY kickoff_utc, id");
   const snapshots = prepareRows<Snapshot, [number]>(db,
-    "SELECT snapshot_key AS key, season, revision, input_hash AS inputHash, policy_version AS policyVersion, model_version AS modelVersion, calendar_policy_version AS calendarPolicyVersion, kind, week, game_cutoff_utc AS gameCutoffUtc, poll_cutoff_utc AS pollCutoffUtc, poll_release_id AS pollReleaseId, coverage_json AS coverage, published_at_utc AS publishedAtUtc FROM snapshots WHERE season = ? AND published_at_utc IS NOT NULL ORDER BY game_cutoff_utc DESC, revision DESC");
+    "SELECT snapshot_key AS key, season, revision, input_hash AS inputHash, policy_version AS policyVersion, model_version AS modelVersion, calendar_policy_version AS calendarPolicyVersion, kind, week, game_cutoff_utc AS gameCutoffUtc, poll_cutoff_utc AS pollCutoffUtc, poll_release_id AS pollReleaseId, coverage_json AS coverage, published_at_utc AS publishedAtUtc FROM snapshots AS s WHERE season = ? AND published_at_utc IS NOT NULL AND NOT EXISTS (SELECT 1 FROM snapshots AS newer WHERE newer.snapshot_key = s.snapshot_key AND newer.revision > s.revision AND newer.published_at_utc IS NOT NULL) ORDER BY game_cutoff_utc DESC, revision DESC");
   const upsertSeason = db.query<void, [number, string, string | null, string, string]>(
     "INSERT INTO seasons (year, state, selection_freeze_utc, calendar_policy_version, coverage_json) VALUES (?, ?, ?, ?, ?) ON CONFLICT(year) DO UPDATE SET state=excluded.state, selection_freeze_utc=excluded.selection_freeze_utc, calendar_policy_version=excluded.calendar_policy_version, coverage_json=excluded.coverage_json");
   const upsertTeam = db.query<void, [string, string | null, string, string | null]>(

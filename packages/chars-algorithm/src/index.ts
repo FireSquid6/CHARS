@@ -147,6 +147,7 @@ export interface SelectionResult {
 
 export interface ScenarioIdentity {
   snapshotKey: string;
+  snapshotRevision: number;
   teamId: string;
   pollModelVersion: string;
   solverVersion: string;
