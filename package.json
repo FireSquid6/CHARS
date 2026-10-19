@@ -1,0 +1,14 @@
+{
+  "name": "chars",
+  "private": true,
+  "packageManager": "bun@1.3.14",
+  "workspaces": ["site", "packages/*"],
+  "scripts": {
+    "dev": "bun run --filter app dev",
+    "build": "bun run --filter app build",
+    "start": "bun run --filter app start",
+    "lint": "bun run --filter app lint",
+    "typecheck": "bun run --filter app typecheck"
+  },
+  "trustedDependencies": ["sharp", "unrs-resolver"]
+}
