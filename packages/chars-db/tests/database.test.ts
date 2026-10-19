@@ -35,7 +35,7 @@ test("migrations are repeatable and every inventory table exists", async () => {
   const { db } = await setup();
   try {
     await migrate(db);
-    expect(db.query("SELECT version FROM schema_migrations").all()).toHaveLength(3);
+    expect(db.query("SELECT version FROM schema_migrations").all()).toHaveLength(4);
     const names = db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'").all().map(row => row.name);
     for (const name of ["seasons", "teams", "team_aliases", "team_seasons", "games", "game_revisions", "ingestion_payloads", "poll_releases", "poll_entries", "snapshots", "snapshot_games", "snapshot_rankings", "selection_events", "bracket_slots", "scenario_jobs", "scenario_statuses", "scenario_witnesses", "sync_runs", "job_leases", "schema_migrations"]) {
       expect(names).toContain(name);
@@ -73,7 +73,7 @@ test("upgrades a populated, previously migrated 001 database without losing FK-l
     await migrate(upgraded);
     await migrate(upgraded);
     expect(upgraded.query<{ version: string }, []>("SELECT version FROM schema_migrations ORDER BY version").all().map(row => row.version))
-      .toEqual(["001_initial.sql", "002_observations_and_snapshot_integrity.sql", "003_calendar_and_provenance.sql"]);
+      .toEqual(["001_initial.sql", "002_observations_and_snapshot_integrity.sql", "003_calendar_and_provenance.sql", "004_input_revisions_and_gaps.sql"]);
     expect(upgraded.query("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(upgraded.query<{ payload_id: string }, []>("SELECT payload_id FROM game_revisions WHERE game_id = 'game'").get()?.payload_id).toBe("payload");
     expect(upgraded.query<{ payload_id: string }, []>("SELECT payload_id FROM poll_releases WHERE id = 'poll'").get()?.payload_id).toBe("payload");
@@ -122,7 +122,7 @@ test("two independent processes migrate the same new database without racing ver
   }
   const db = openDatabase({ path });
   try {
-    expect(db.query("SELECT * FROM schema_migrations").all()).toHaveLength(3);
+    expect(db.query("SELECT * FROM schema_migrations").all()).toHaveLength(4);
     expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
   } finally { db.close(); }
 });
@@ -194,6 +194,31 @@ test("identical payloads remain separate observations across sources, dates, and
     insert.run("second", "/games?year=2026", "2026-10-02T00:00:00Z");
     insert.run("third", "/games?year=2025", "2026-10-02T00:00:00Z");
     expect(db.query("SELECT id FROM ingestion_payloads WHERE source = 'cfbd' AND hash = 'same-hash'").all()).toHaveLength(3);
+  } finally { db.close(); }
+});
+
+test("004 upgrades historical duplicate poll weeks without losing either release", async () => {
+  const db = openDatabase({ path: temporaryPath() });
+  try {
+    db.exec("PRAGMA foreign_keys=OFF");
+    for (const file of ["001_initial.sql", "002_observations_and_snapshot_integrity.sql", "003_calendar_and_provenance.sql"]) {
+      db.exec(await Bun.file(join(import.meta.dir, "../migrations", file)).text());
+    }
+    db.exec("PRAGMA foreign_keys=ON");
+    db.exec("CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at_utc TEXT NOT NULL)");
+    for (const file of ["001_initial.sql", "002_observations_and_snapshot_integrity.sql", "003_calendar_and_provenance.sql"]) {
+      db.query("INSERT INTO schema_migrations VALUES (?, '2026-10-01T00:00:00Z')").run(file);
+    }
+    db.query("INSERT INTO seasons (year, state, calendar_policy_version) VALUES (1998, 'incomplete', 'v1')").run();
+    db.query(`INSERT INTO ingestion_payloads VALUES
+      ('old', 'cfbd:rankings', '/rankings', 1998, 'oldhash', '2026-10-01T00:00:00Z', '{}'),
+      ('new', 'cfbd:rankings', '/rankings', 1998, 'newhash', '2026-10-02T00:00:00Z', '{}')`).run();
+    db.query(`INSERT INTO poll_releases (id, season, poll_type, game_week, source_hash, payload_id) VALUES
+      ('old-poll', 1998, 'ap', 2, 'oldhash', 'old'), ('new-poll', 1998, 'ap', 2, 'newhash', 'new')`).run();
+    await migrate(db);
+    expect(db.query<{ id: string; is_current: number }, []>("SELECT id, is_current FROM poll_releases ORDER BY id").all())
+      .toEqual([{ id: "new-poll", is_current: 1 }, { id: "old-poll", is_current: 0 }]);
+    expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
   } finally { db.close(); }
 });
 

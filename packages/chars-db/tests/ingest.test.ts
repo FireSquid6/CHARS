@@ -15,7 +15,7 @@ const team = (id: number, classification: string) => ({ id, school: `School ${id
   abbreviation: `S${id}`, alternateNames: [`University ${id}`], conference: "Test" });
 const base = { id: 11, season: year, week: 1, seasonType: "regular", startDate: "1998-09-05T20:00:00Z",
   completed: false, homeId: 1, awayId: 2, homeTeam: "School 1", awayTeam: "School 2",
-  homePoints: 0, awayPoints: 0, homeClassification: "fbs", awayClassification: "fcs", notes: null, playoff: null };
+  homePoints: 0, awayPoints: 0, homeClassification: "fbs", awayClassification: "fcs", notes: null, playoff: null, status: "scheduled" };
 function client(games: unknown[], ranks: unknown[] = [], calendar: unknown[] = [
   { season: year, seasonType: "regular", week: 1, startDate: "1998-09-01T00:00:00Z", endDate: "1998-09-08T00:00:00Z" }
 ]) {
@@ -44,7 +44,7 @@ test("first insert, repeated observation, FCS win, correction and raw provenance
     expect(ingestSeason(db, year, await fetchSeason(client([base]), year))).toMatchObject({ unchanged: 1, revised: 0 });
     expect(db.query("SELECT * FROM game_revisions").all()).toHaveLength(1);
     expect(db.query("SELECT * FROM ingestion_payloads WHERE source='cfbd:games'").all()).toHaveLength(4);
-    const result = { ...base, completed: true, homePoints: 14, awayPoints: 7 };
+    const result = { ...base, completed: true, status: "completed", homePoints: 14, awayPoints: 7 };
     expect(ingestSeason(db, year, await fetchSeason(client([result]), year))).toMatchObject({ revised: 1 });
     const rows = db.query<{ revision: number; payload_id: string; previous_normalized_json: string | null; normalized_json: string }, []>(
       "SELECT revision, payload_id, previous_normalized_json, normalized_json FROM game_revisions ORDER BY revision").all();
@@ -64,13 +64,13 @@ test("cancelled 0-0, unknown classifications, poll ties/unranked, missing calend
   try {
     const polls = [{ season: year, seasonType: "regular", week: 1, polls: [{ poll: "AP Top 25", isFinal: false,
       ranks: [{ teamId: 1, school: "School 1", rank: 1, points: 10 }, { teamId: 2, school: "School 2", rank: 1, points: 10 }] }] }];
-    const cancelled = { ...base, notes: "Game canceled" };
+    const cancelled = { ...base, status: "cancelled", notes: "Game canceled" };
     const result = ingestSeason(db, year, await fetchSeason(client([cancelled], polls, []), year));
     expect(result.coverage).toMatchObject({ calendar: false, gameClassification: false, pollReleaseTiming: false });
     expect(db.query<{ status: string; home_score: number | null }, []>("SELECT status, home_score FROM games").get())
       .toMatchObject({ status: "cancelled", home_score: null });
     expect(db.query<{ timing_provenance: string; released_at_utc: string | null }, []>("SELECT timing_provenance, released_at_utc FROM poll_releases").get())
-      .toMatchObject({ timing_provenance: "unknown_provider_has_no_release_time", released_at_utc: null });
+      .toMatchObject({ timing_provenance: "unknown", released_at_utc: null });
     expect(db.query<{ rank: number }, []>("SELECT rank FROM poll_entries").all().map(r => r.rank)).toEqual([1, 1]);
     expect(pollsAtCutoff(db, year, "1998-12-31T00:00:00Z")).toEqual([]);
     const unranked = [{ ...polls[0], polls: [{ ...polls[0]!.polls[0], ranks: [{ teamId: 1, school: "School 1", rank: null, points: 0 }] }] }];
@@ -97,14 +97,14 @@ test("CCG freeze uses preceding full calendar week; uncertain postseason and fut
   const db = await setup();
   try {
     const ccg = { ...base, id: 12, seasonType: "postseason", week: 2, startDate: "1998-09-12T20:00:00Z",
-      completed: true, homePoints: 35, awayPoints: 21, notes: "Conference Championship" };
+      completed: true, status: "completed", homePoints: 35, awayPoints: 21, notes: "Conference Championship" };
     const unknown = { ...base, id: 13, seasonType: "postseason", week: 3, startDate: "1998-09-20T20:00:00Z",
-      completed: true, homePoints: 24, awayPoints: 0 };
+      completed: true, status: "completed", homePoints: 24, awayPoints: 0 };
     const calendar = [
       { season: year, seasonType: "regular", week: 1, startDate: "1998-09-01T00:00:00Z", endDate: "1998-09-08T00:00:00Z" },
       { season: year, seasonType: "postseason", week: 2, startDate: "1998-09-09T00:00:00Z", endDate: "1998-09-16T00:00:00Z" }
     ];
-    const input = await fetchSeason(client([{ ...base, completed: true, homePoints: 7, awayPoints: 0 }, ccg, unknown], [], calendar), year);
+    const input = await fetchSeason(client([{ ...base, status: "completed", completed: true, homePoints: 7, awayPoints: 0 }, ccg, unknown], [], calendar), year);
     expect(ingestSeason(db, year, input)).toMatchObject({ selectionFreezeUtc: "1998-09-08T00:00:00.000Z",
       coverage: { gameClassification: false } });
     expect(db.query<{ application_game_type: string }, []>("SELECT application_game_type FROM games ORDER BY id").all()
@@ -112,5 +112,79 @@ test("CCG freeze uses preceding full calendar week; uncertain postseason and fut
     expect(gamesAtCutoff(db, year, "1999-01-01T00:00:00Z").map(g => g.id)).toEqual(["cfbd:11"]);
     expect(db.query<{ classification_provenance_json: string }, []>("SELECT classification_provenance_json FROM games WHERE id='cfbd:12'").get()?.classification_provenance_json)
       .toContain("explicit_conference_championship_notes");
+  } finally { db.close(); }
+});
+
+test("season conference name classifies a named championship; unrelated titles stay unknown", async () => {
+  const db = await setup();
+  try {
+    const named = { ...base, id: 33, status: "completed", completed: true, homePoints: 14, awayPoints: 7,
+      seasonType: "postseason", notes: "SEC Championship", startDate: "1998-09-15T20:00:00Z" };
+    const uncertain = { ...named, id: 34, notes: "Invitational Championship" };
+    const input = await fetchSeason(client([named, uncertain]), year);
+    input.teams.items[0]!.conference = "SEC";
+    expect(ingestSeason(db, year, input).coverage.gameClassification).toBe(false);
+    expect(db.query<{ application_game_type: string }, []>("SELECT application_game_type FROM games ORDER BY id").all()
+      .map(row => row.application_game_type)).toEqual(["ccg", "unknown"]);
+    expect(db.query<{ classification_provenance_json: string }, []>("SELECT classification_provenance_json FROM games WHERE id='cfbd:33'").get()?.classification_provenance_json)
+      .toContain("season_conference_named_championship");
+  } finally { db.close(); }
+});
+
+test("unknown and contradictory game status aborts before any write, retaining final metadata and results", async () => {
+  const db = await setup();
+  try {
+    ingestSeason(db, year, await fetchSeason(client([{ ...base, completed: true, status: "completed", homePoints: 17, awayPoints: 3 }]), year));
+    db.query("UPDATE seasons SET state='final', coverage_json='{" + '"validated":true' + "}', selection_freeze_utc='1998-12-01T00:00:00Z' WHERE year=?").run(year);
+    const before = db.query<{ home_score: number }, []>("SELECT home_score FROM games").get();
+    const observations = db.query<{ count: number }, []>("SELECT count(*) AS count FROM ingestion_payloads").get()?.count;
+    const contradictory = await fetchSeason(client([{ ...base, completed: true, status: "cancelled", homePoints: 0, awayPoints: 0 }]), year);
+    expect(() => ingestSeason(db, year, contradictory)).toThrow("unknown or contradictory provider status");
+    expect(db.query<{ home_score: number }, []>("SELECT home_score FROM games").get()).toEqual(before);
+    expect(db.query<{ count: number }, []>("SELECT count(*) AS count FROM ingestion_payloads").get()?.count).toBe(observations);
+    expect(() => ingestSeason(db, year, awaitInputWithoutStatus(contradictory))).toThrow("unknown or contradictory provider status");
+    expect(ingestSeason(db, year, await fetchSeason(client([]), year))).toMatchObject({ coverage: { schedule: false } });
+    expect(db.query<{ state: string; coverage_json: string; selection_freeze_utc: string }, []>("SELECT state, coverage_json, selection_freeze_utc FROM seasons").get())
+      .toMatchObject({ state: "final", coverage_json: '{"validated":true}', selection_freeze_utc: "1998-12-01T00:00:00Z" });
+    expect(db.query("SELECT * FROM season_ingestion_gaps").all()).toHaveLength(2);
+  } finally { db.close(); }
+});
+
+function awaitInputWithoutStatus(input: Awaited<ReturnType<typeof fetchSeason>>) {
+  const game = input.games.items[0]!;
+  return { ...input, games: { ...input.games, items: [{ ...game, status: "unknown" as const }] } };
+}
+
+test("poll week convention, corrected release supersession, calendar revision invalidation and late finish", async () => {
+  const db = await setup();
+  try {
+    const calendar = [
+      { season: year, seasonType: "regular", week: 1, startDate: "1998-09-01T00:00:00Z", endDate: "1998-09-08T00:00:00Z" },
+      { season: year, seasonType: "regular", week: 2, startDate: "1998-09-09T00:00:00Z", endDate: "1998-09-16T00:00:00Z" }
+    ];
+    const poll = (points: number) => [{ season: year, seasonType: "regular", week: 2,
+      polls: [{ poll: "AP Top 25", isFinal: false, ranks: [
+        { teamId: 1, school: "School 1", rank: 1, points }, { teamId: 2, school: "School 2", rank: 1, points: 20 }] }] }];
+    const completed = { ...base, status: "completed", completed: true, homePoints: 10, awayPoints: 0 };
+    ingestSeason(db, year, await fetchSeason(client([completed], poll(30), calendar), year));
+    expect(pollsAtCutoff(db, year, "1998-09-08T23:59:59Z")).toEqual([]);
+    expect(pollsAtCutoff(db, year, "1998-09-09T00:00:00Z")).toMatchObject([{ game_week: 2, timing_provenance: "derived_convention" }]);
+    db.query(`INSERT INTO snapshots (snapshot_key, revision, season, kind, game_cutoff_utc, input_hash, policy_version,
+      model_version, calendar_policy_version, coverage_json, published_at_utc)
+      VALUES ('weekly', 1, 1998, 'week_final', '1998-09-16T00:00:00Z', 'hash', 'v1', 'v1', 'v1', '{}', '1998-09-17T00:00:00Z')`).run();
+    ingestSeason(db, year, await fetchSeason(client([completed], poll(40), calendar), year));
+    expect(db.query<{ is_current: number }, []>("SELECT is_current FROM poll_releases ORDER BY id").all().map(r => r.is_current).sort()).toEqual([0, 1]);
+    expect(pollsAtCutoff(db, year, "1998-09-10T00:00:00Z")).toHaveLength(1);
+    expect(db.query("SELECT * FROM snapshot_input_invalidations WHERE reason='poll_revised'").all()).toHaveLength(1);
+    const moved = [calendar[0]!, { ...calendar[1]!, startDate: "1998-09-10T00:00:00Z" }];
+    ingestSeason(db, year, await fetchSeason(client([completed], poll(40), moved), year));
+    expect(db.query("SELECT * FROM calendar_revisions WHERE week=2").all()).toHaveLength(2);
+    expect(db.query("SELECT * FROM snapshot_input_invalidations WHERE reason='calendar_changed'").all()).toHaveLength(1);
+    expect(pollsAtCutoff(db, year, "1998-09-09T12:00:00Z")).toHaveLength(0);
+    expect(db.query("SELECT * FROM snapshot_input_invalidations WHERE snapshot_key='weekly'").all()).toHaveLength(3);
+    ingestSeason(db, year, await fetchSeason(client([{ ...completed, endDate: "1998-09-09T02:00:00Z" }], poll(40), moved), year));
+    expect(gamesAtCutoff(db, year, "1998-09-16T00:00:00Z")).toEqual([]);
+    expect(db.query("SELECT * FROM snapshot_input_invalidations WHERE reason='game_revised'").all()).toHaveLength(1);
+    expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
   } finally { db.close(); }
 });
