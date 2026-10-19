@@ -229,3 +229,17 @@ test("N+1 AP poll without a next regular calendar week publishes a pre-CCG final
     expect(publishedSnapshot(db, "1998:selection-final")?.revision).toBe(1);
   } finally { db.close(); }
 });
+
+test("missing previously observed game is a schedule gap, not a cancellation", async () => {
+  const db = await setup();
+  try {
+    const second = { ...base, id: 12, startDate: "1998-09-06T20:00:00Z" };
+    ingestSeason(db, year, await fetchSeason(client([base, second]), year));
+    const before = db.query<{ generation: number }, []>("SELECT generation FROM season_input_generations WHERE season=1998").get()!.generation;
+    const report = ingestSeason(db, year, await fetchSeason(client([base]), year));
+    expect(report.coverage.schedule).toBe(false);
+    expect(db.query<{ status: string }, []>("SELECT status FROM games WHERE id='cfbd:12'").get()?.status).toBe("scheduled");
+    expect(db.query<{ generation: number }, []>("SELECT generation FROM season_input_generations WHERE season=1998").get()!.generation).toBe(before + 1);
+    expect(ingestSeason(db, year, await fetchSeason(client([base, second]), year)).coverage.schedule).toBe(true);
+  } finally { db.close(); }
+});

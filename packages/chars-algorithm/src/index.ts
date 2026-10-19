@@ -104,6 +104,7 @@ export interface Snapshot extends SnapshotIdentity {
   pollReleaseId: string | null;
   coverage: string;
   publishedAtUtc: string | null;
+  publicationState?: "current" | "pending" | "stale";
 }
 
 export interface RecordStats {

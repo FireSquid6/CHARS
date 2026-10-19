@@ -35,7 +35,7 @@ test("migrations are repeatable and every inventory table exists", async () => {
   const { db } = await setup();
   try {
     await migrate(db);
-    expect(db.query("SELECT version FROM schema_migrations").all()).toHaveLength(5);
+    expect(db.query("SELECT version FROM schema_migrations").all()).toHaveLength(6);
     const names = db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'").all().map(row => row.name);
     for (const name of ["seasons", "teams", "team_aliases", "team_seasons", "games", "game_revisions", "ingestion_payloads", "poll_releases", "poll_entries", "snapshots", "snapshot_games", "snapshot_rankings", "selection_events", "bracket_slots", "scenario_jobs", "scenario_statuses", "scenario_witnesses", "sync_runs", "job_leases", "schema_migrations"]) {
       expect(names).toContain(name);
@@ -73,7 +73,7 @@ test("upgrades a populated, previously migrated 001 database without losing FK-l
     await migrate(upgraded);
     await migrate(upgraded);
     expect(upgraded.query<{ version: string }, []>("SELECT version FROM schema_migrations ORDER BY version").all().map(row => row.version))
-      .toEqual(["001_initial.sql", "002_observations_and_snapshot_integrity.sql", "003_calendar_and_provenance.sql", "004_input_revisions_and_gaps.sql", "005_snapshot_publication.sql"]);
+      .toEqual(["001_initial.sql", "002_observations_and_snapshot_integrity.sql", "003_calendar_and_provenance.sql", "004_input_revisions_and_gaps.sql", "005_snapshot_publication.sql", "006_input_generation_and_publication_state.sql"]);
     expect(upgraded.query("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(upgraded.query<{ payload_id: string }, []>("SELECT payload_id FROM game_revisions WHERE game_id = 'game'").get()?.payload_id).toBe("payload");
     expect(upgraded.query<{ payload_id: string }, []>("SELECT payload_id FROM poll_releases WHERE id = 'poll'").get()?.payload_id).toBe("payload");
@@ -122,7 +122,7 @@ test("two independent processes migrate the same new database without racing ver
   }
   const db = openDatabase({ path });
   try {
-    expect(db.query("SELECT * FROM schema_migrations").all()).toHaveLength(5);
+    expect(db.query("SELECT * FROM schema_migrations").all()).toHaveLength(6);
     expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
   } finally { db.close(); }
 });
@@ -222,6 +222,33 @@ test("004 upgrades historical duplicate poll weeks without losing either release
   } finally { db.close(); }
 });
 
+test("005 upgrades mixed published and unpublished revisions using highest published revision, not latest timestamp", async () => {
+  const db = openDatabase({ path: temporaryPath() });
+  try {
+    db.exec("PRAGMA foreign_keys=OFF");
+    const files = ["001_initial.sql", "002_observations_and_snapshot_integrity.sql",
+      "003_calendar_and_provenance.sql", "004_input_revisions_and_gaps.sql"];
+    for (const file of files) db.exec(await Bun.file(join(import.meta.dir, "../migrations", file)).text());
+    db.exec("PRAGMA foreign_keys=ON");
+    db.exec("CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at_utc TEXT NOT NULL)");
+    for (const file of files) db.query("INSERT INTO schema_migrations VALUES (?, '2026-10-01T00:00:00Z')").run(file);
+    db.query("INSERT INTO seasons (year, state, calendar_policy_version) VALUES (2020, 'final', 'calendar')").run();
+    const insert = db.query(`INSERT INTO snapshots (snapshot_key,revision,season,kind,game_cutoff_utc,
+      input_hash,policy_version,model_version,calendar_policy_version,coverage_json,published_at_utc)
+      VALUES (?,?,2020,'week_final','2020-09-01','hash','policy','model','calendar','{}',?)`);
+    insert.run("week", 1, "2020-09-09");
+    insert.run("week", 2, null);
+    insert.run("week", 3, "2020-09-08");
+    insert.run("only-unpublished", 1, null);
+    await migrate(db);
+    expect(db.query<{ snapshot_key: string; revision: number; published_at_utc: string; state: string }, []>(
+      "SELECT snapshot_key,revision,published_at_utc,state FROM snapshot_publications").all())
+      .toEqual([{ snapshot_key: "week", revision: 3, published_at_utc: "2020-09-08", state: "current" }]);
+    expect(db.query<{ generation: number }, []>("SELECT generation FROM season_input_generations WHERE season=2020").get()?.generation).toBe(1);
+    expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
+  } finally { db.close(); }
+});
+
 test("publishedSnapshots returns only the newest published revision per key", async () => {
   const { db } = await setup();
   try {
@@ -231,7 +258,7 @@ test("publishedSnapshots returns only the newest published revision per key", as
     insert.run("week-1", 1, "2026-09-01", "2026-09-02");
     insert.run("week-1", 2, "2026-09-01", null);
     insert.run("week-2", 1, "2026-09-08", "2026-09-09");
-    db.query("INSERT INTO snapshot_publications VALUES ('week-1', 1, '2026-09-02'), ('week-2', 1, '2026-09-09')").run();
+    db.query("INSERT INTO snapshot_publications (snapshot_key, revision, published_at_utc) VALUES ('week-1', 1, '2026-09-02'), ('week-2', 1, '2026-09-09')").run();
     expect(repo.publishedSnapshots(2026).map(s => `${s.key}:${s.revision}`)).toEqual(["week-2:1", "week-1:1"]);
     db.query("UPDATE snapshots SET published_at_utc = '2026-09-10' WHERE snapshot_key = 'week-1' AND revision = 2").run();
     db.query("UPDATE snapshot_publications SET revision=2, published_at_utc='2026-09-10' WHERE snapshot_key='week-1'").run();
@@ -278,7 +305,7 @@ test("stores alternative witnesses and hides incomplete publication from a secon
     repo.saveTeam({ id: "a", providerId: "1", name: "A", abbreviation: null });
     transaction(db, () => {
       db.query("INSERT INTO snapshots (snapshot_key, revision, season, kind, game_cutoff_utc, input_hash, policy_version, model_version, calendar_policy_version, coverage_json, published_at_utc) VALUES ('week', 1, 2026, 'week_final', '2026-09-01', 'hash', 'policy', 'model', 'calendar', '{}', '2026-09-02')").run();
-      db.query("INSERT INTO snapshot_publications VALUES ('week', 1, '2026-09-02')").run();
+      db.query("INSERT INTO snapshot_publications (snapshot_key, revision, published_at_utc) VALUES ('week', 1, '2026-09-02')").run();
       expect(visible.publishedSnapshots(2026)).toEqual([]);
       db.query("INSERT INTO scenario_jobs (id, snapshot_key, snapshot_revision, poll_model_version, solver_version, input_hash, state, created_at_utc, updated_at_utc) VALUES ('job', 'week', 1, 'all', 'v1', 'hash', 'pending', '2026-09-02', '2026-09-02')").run();
       db.query("INSERT INTO scenario_statuses (job_id, team_id, state, assumptions_json) VALUES ('job', 'a', 'pending', '[]')").run();

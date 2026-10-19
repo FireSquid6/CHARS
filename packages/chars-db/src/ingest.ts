@@ -109,10 +109,14 @@ export function ingestSeason(db: Database, year: number, input: SeasonInput): In
   return transaction(db, () => {
     const repo = createRepository(db);
     const existing = repo.season(year);
+    const previousObservation = db.query<{ coverage_json: string; selection_freeze_utc: string | null }, [number]>(
+      "SELECT coverage_json, selection_freeze_utc FROM season_ingestion_gaps WHERE season=? ORDER BY observed_at_utc DESC, rowid DESC LIMIT 1").get(year);
+    let material = !existing;
     // A fresh observation is not an atomic validated replacement for a published final season.
     if (!existing || existing.state !== "final") repo.saveSeason({ year, state: "incomplete", selectionFreezeUtc: freeze,
       calendarPolicyVersion: "pre-ccg-last-full-regular-week-v1", coverage: JSON.stringify(coverage) });
     function invalidate(reason: string, inputId: string) {
+      material = true;
       db.query(`INSERT OR IGNORE INTO snapshot_input_invalidations
         (snapshot_key, snapshot_revision, reason, input_id, observed_at_utc)
         SELECT snapshot_key, revision, ?, ?, ? FROM snapshots WHERE season=? AND published_at_utc IS NOT NULL`)
@@ -131,11 +135,17 @@ export function ingestSeason(db: Database, year: number, input: SeasonInput): In
     void fbsSourceId;
     for (const team of input.teams.items) {
       const identity = resolver.byProviderId(team.id);
+      const priorMembership = repo.teamSeason(year, identity.id);
+      if (!priorMembership || priorMembership.membership !== membership(team.membership) || priorMembership.conference !== team.conference)
+        invalidate("membership_changed", identity.id);
       repo.saveTeam({ id: identity.id, providerId: team.id, name: team.school, abbreviation: team.abbreviation });
       repo.saveTeamSeason({ season: year, teamId: identity.id, membership: membership(team.membership), conference: team.conference });
     }
     // FCS opponents omitted from the season roster still have stable numeric provider identities.
     for (const game of games) for (const side of Object.values(resolver.game(game))) {
+      const priorMembership = repo.teamSeason(year, side.id);
+      if (!priorMembership || priorMembership.membership !== membership(side.membership) || priorMembership.conference !== side.conference)
+        invalidate("membership_changed", side.id);
       if (!repo.team(side.id)) repo.saveTeam({ id: side.id, providerId: side.providerId, name: side.name, abbreviation: null });
       repo.saveTeamSeason({ season: year, teamId: side.id, membership: membership(side.membership), conference: side.conference });
     }
@@ -174,6 +184,13 @@ export function ingestSeason(db: Database, year: number, input: SeasonInput): In
       // Missing rows are not deletions; flag coverage and dependent publications.
       coverage.calendar = false;
       invalidate("calendar_missing", `${old.season_type}:${old.week}`);
+    }
+    const incomingGames = new Set(games.map(g => `cfbd:${g.id}`));
+    const missingGames = db.query<{ id: string }, [number]>("SELECT id FROM games WHERE season=?").all(year)
+      .filter(row => !incomingGames.has(row.id));
+    if (missingGames.length) {
+      coverage.schedule = false;
+      for (const missing of missingGames) invalidate("game_missing_from_observation", missing.id);
     }
     for (const { game, classification } of classifications) {
       const id = `cfbd:${game.id}`, payloadHash = hash(game.raw);
@@ -221,6 +238,7 @@ export function ingestSeason(db: Database, year: number, input: SeasonInput): In
         VALUES (?, ?, ?, ?, ?, ?, ?)`).run(id, (prior?.result_revision ?? 0) + 1, source.id, payloadHash, observed,
           prior?.normalized_json ?? null, json);
       if (prior) invalidate("game_revised", `${id}:${prior.result_revision + 1}`);
+      else material = true;
       if (prior) report.revised++; else report.inserted++;
     }
     for (const week of input.rankings.items) for (const poll of week.polls) {
@@ -246,6 +264,7 @@ export function ingestSeason(db: Database, year: number, input: SeasonInput): In
         db.query("UPDATE poll_releases SET is_current=0 WHERE id=?").run(current.id);
         invalidate("poll_revised", `${pollType}:${week.week}:${id}`);
       }
+      material = true;
       // A previously observed hash can recur; reactivate rather than duplicate its entries.
       if (db.query("SELECT 1 FROM poll_releases WHERE id=?").get(id)) {
         db.query("UPDATE poll_releases SET is_current=1, effective_at_utc=?, timing_provenance=? WHERE id=?")
@@ -264,6 +283,17 @@ export function ingestSeason(db: Database, year: number, input: SeasonInput): In
     }
     if (existing?.state !== "final") repo.saveSeason({ year, state: "incomplete", selectionFreezeUtc: freeze,
       calendarPolicyVersion: "pre-ccg-last-full-regular-week-v1", coverage: JSON.stringify(coverage) });
+    if (existing && ((previousObservation?.selection_freeze_utc ?? existing.selectionFreezeUtc) !== freeze ||
+      (previousObservation?.coverage_json ?? existing.coverage) !== JSON.stringify(coverage))) material = true;
+    if (material) {
+      db.query(`INSERT INTO season_input_generations (season, generation) VALUES (?, 1)
+        ON CONFLICT(season) DO UPDATE SET generation=generation+1`).run(year);
+      db.query(`UPDATE snapshot_publications SET state=CASE WHEN EXISTS
+        (SELECT 1 FROM snapshots s WHERE s.snapshot_key=snapshot_publications.snapshot_key
+          AND s.revision=snapshot_publications.revision AND s.kind='selection_final')
+        THEN 'stale' ELSE 'pending' END WHERE snapshot_key IN
+        (SELECT snapshot_key FROM snapshots WHERE season=?)`).run(year);
+    }
     db.query("INSERT INTO season_ingestion_gaps (id, season, observed_at_utc, coverage_json, selection_freeze_utc) VALUES (?, ?, ?, ?, ?)")
       .run(randomUUID(), year, input.calendar.observedAtUtc, JSON.stringify(coverage), freeze);
     return report;
