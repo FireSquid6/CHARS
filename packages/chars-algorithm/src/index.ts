@@ -12,6 +12,10 @@ export { buildHeadToHead } from "./head-to-head";
 export type { HeadToHeadEdge, HeadToHeadGraph } from "./head-to-head";
 export { selectField } from "./selection";
 export type { SelectionInput, SelectedTeam, SelectionSwap, SelectionResult as FieldSelectionResult } from "./selection";
+export { seedField } from "./seeding";
+export type { SeedingEdge, SeededTeam, SeedingResult } from "./seeding";
+export { buildBracket, computePlayoff, standardSeedOrder } from "./brackets";
+export type { PlayinPair, MainSlot, MainMatch, BracketEntry, BracketResult } from "./brackets";
 
 export type SeasonState = "preseason" | "current" | "final" | "incomplete";
 export type Membership = "fbs" | "fcs" | "other";
