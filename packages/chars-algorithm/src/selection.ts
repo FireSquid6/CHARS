@@ -1,5 +1,5 @@
 import type { ColleyResult } from "./colley";
-import { computeEligibility, type SeasonGames } from "./eligibility";
+import { colleyInputFingerprint, computeEligibility, type SeasonGames } from "./eligibility";
 import { buildHeadToHead, type HeadToHeadEdge, type HeadToHeadGraph } from "./head-to-head";
 import type { PollEntry, RecordStats, SelectionCategory, SelectionRoute } from "./index";
 
@@ -73,6 +73,9 @@ export function selectField(input: SelectionInput): SelectionResult {
       supplied.percentageDenominator !== record.percentageDenominator) {
       throw new Error(`Record disagrees with included games: ${teamId}`);
     }
+  }
+  if (input.ratings.inputFingerprint !== colleyInputFingerprint(input)) {
+    throw new Error("Colley ratings disagree with season membership or included outcomes");
   }
   const eligible = new Set([...computed].filter(([, value]) => value.eligible).map(([id]) => id));
   const compare = input.ratings.compareTeamIds;

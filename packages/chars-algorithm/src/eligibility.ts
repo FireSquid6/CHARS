@@ -23,6 +23,7 @@ export function includedRegularGames(input: SeasonGames): IncludedGame[] {
   if (!Number.isSafeInteger(input.season) || input.season < 1) throw new Error("Invalid declared season");
   const membership = new Map<string, TeamSeason>();
   const seenGames = new Set<string>();
+  const seenProviderGames = new Set<string>();
   for (const team of input.teams) {
     if (team.season !== input.season) throw new Error(`Wrong-season team ${team.teamId}: expected ${input.season}`);
     if (!team.teamId || membership.has(team.teamId)) throw new Error(`Duplicate/empty team ID: ${team.teamId}`);
@@ -33,6 +34,10 @@ export function includedRegularGames(input: SeasonGames): IncludedGame[] {
     if (game.season !== input.season) throw new Error(`Wrong-season game ${game.id}: expected ${input.season}`);
     if (!game.id || seenGames.has(game.id)) throw new Error(`Duplicate/empty game ID: ${game.id}`);
     seenGames.add(game.id);
+    if (!game.providerGameId || seenProviderGames.has(game.providerGameId)) {
+      throw new Error(`Duplicate/empty provider game ID: ${game.providerGameId}`);
+    }
+    seenProviderGames.add(game.providerGameId);
     if (game.homeTeamId === game.awayTeamId) throw new Error(`Identical opponents in ${game.id}`);
     const home = membership.get(game.homeTeamId);
     const away = membership.get(game.awayTeamId);
@@ -48,6 +53,16 @@ export function includedRegularGames(input: SeasonGames): IncludedGame[] {
       awayMembership: away.membership });
   }
   return included;
+}
+
+/** Collision-free canonical identity for the season's memberships and included outcomes. */
+export function colleyInputFingerprint(input: SeasonGames): string {
+  const games = includedRegularGames(input)
+    .map(game => [game.id, game.homeTeamId, game.awayTeamId, game.homeScore, game.awayScore] as const)
+    .sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+  const teams = input.teams.map(team => [team.teamId, team.membership] as const)
+    .sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+  return JSON.stringify([input.season, teams, games]);
 }
 
 export function recordIsEligible(record: Pick<RecordStats, "wins" | "losses" | "ties">): boolean {

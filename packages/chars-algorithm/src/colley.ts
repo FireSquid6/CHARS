@@ -1,4 +1,4 @@
-import { includedRegularGames, type SeasonGames } from "./eligibility";
+import { colleyInputFingerprint, includedRegularGames, type SeasonGames } from "./eligibility";
 
 type Fraction = { numerator: bigint; denominator: bigint };
 const ZERO: Fraction = { numerator: 0n, denominator: 1n };
@@ -63,6 +63,8 @@ export interface ColleyTeamRating {
 }
 
 export interface ColleyResult {
+  /** Canonical season, memberships and included outcomes used for these ratings. */
+  inputFingerprint: string;
   /** Ordered by descending rating, then ascending stable ID for exact ties. */
   ratings: ColleyTeamRating[];
   /** Negative if a precedes b in Colley order. */
@@ -72,6 +74,7 @@ export interface ColleyResult {
 }
 
 export function computeColley(input: SeasonGames): ColleyResult {
+  const inputFingerprint = colleyInputFingerprint(input);
   const ids = input.teams.filter(team => team.membership === "fbs").map(team => team.teamId).sort();
   if (new Set(ids).size !== ids.length || ids.some(id => !id)) throw new Error("Duplicate/empty FBS team ID");
   const index = new Map(ids.map((id, i) => [id, i]));
@@ -165,5 +168,5 @@ export function computeColley(input: SeasonGames): ColleyResult {
       colleyRank: i + 1, residual: residuals[at]!,
       errorBound: error, precisionMethod: refined.has(at) ? "cholesky+exact-comparison" : "cholesky" };
   });
-  return { ratings: result, compareTeamIds, meetsThreshold };
+  return { inputFingerprint, ratings: result, compareTeamIds, meetsThreshold };
 }

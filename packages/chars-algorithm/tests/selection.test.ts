@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { computeColley, computeEligibility } from "../src/index";
+import { colleyInputFingerprint, computeColley, computeEligibility } from "../src/index";
 import { buildHeadToHead } from "../src/head-to-head";
 import { selectField, type SelectionInput } from "../src/selection";
 import type { ColleyResult } from "../src/colley";
@@ -19,15 +19,16 @@ function fixture(ratings: Record<string, number>, games: Game[] = [],
   const ids = Object.keys(ratings).sort();
   const compare = (a: string, b: string) => ratings[b]! - ratings[a]! || a.localeCompare(b);
   const ordered = [...ids].sort(compare);
-  const result: ColleyResult = { ratings: ordered.map((teamId, i) => ({ teamId, colleyRating: ratings[teamId]!,
-    colleyRank: i + 1, residual: 0, errorBound: 0, precisionMethod: "cholesky" })),
-  compareTeamIds: compare, meetsThreshold: (id, threshold) => ratings[id]! >= Number(threshold) };
   // FCS games establish eligibility without perturbing the FBS-only Colley or H2H graph.
   const fcsGames = ids.flatMap(id => Array.from({ length: 12 }, (_, i) =>
     game(`fcs-${id}-${i}`, id, "FCS", { homeScore: i < (options.ineligible?.includes(id) ? 8 : 12) ? 1 : 0,
       awayScore: i < (options.ineligible?.includes(id) ? 8 : 12) ? 0 : 1 })));
   const allGames = [...games, ...fcsGames];
   const roster = teams(...ids, "FCS");
+  const result: ColleyResult = { inputFingerprint: colleyInputFingerprint({ season, teams: roster, games: allGames }),
+    ratings: ordered.map((teamId, i) => ({ teamId, colleyRating: ratings[teamId]!,
+      colleyRank: i + 1, residual: 0, errorBound: 0, precisionMethod: "cholesky" })),
+    compareTeamIds: compare, meetsThreshold: (id, threshold) => ratings[id]! >= Number(threshold) };
   return { season, teams: roster, games: allGames, ratings: result,
     records: [...computeEligibility({ season, teams: roster, games: allGames })].map(([teamId, { record }]) => ({ teamId, record })),
     pollEntries: options.poll ?? [] };
@@ -47,6 +48,25 @@ describe("stage 1", () => {
     const input = fixture({ A: .93, B: .8 });
     const games = input.games.map(g => g.id === "fcs-A-0" ? { ...g, homeScore: 0, awayScore: 1 } : g);
     expect(() => selectField({ ...input, games })).toThrow(/Record disagrees with included games: A/);
+  });
+
+  test("rejects ratings from a different included FBS outcome with the same roster and valid records", () => {
+    const input = fixture({ A: .94, B: .87, C: .8, D: .79 }, [game("ab", "A", "B")]);
+    const games = input.games.map(g => g.id === "ab" ? { ...g, homeScore: 0, awayScore: 1 } : g);
+    const records = [...computeEligibility({ ...input, games })].map(([teamId, { record }]) => ({ teamId, record }));
+    expect(() => selectField({ ...input, games, records })).toThrow(/Colley ratings disagree/);
+    expect(selectField({ ...input, games: [...input.games].reverse() }).initialBid).toEqual(selectField(input).initialBid);
+  });
+
+  test("snapshot identity also detects changed FCS outcomes and membership with reconciled records", () => {
+    const input = fixture({ A: .91, B: .89 });
+    const games = input.games.map(g => g.id === "fcs-A-0" ? { ...g, homeScore: 0, awayScore: 1 } : g);
+    const records = [...computeEligibility({ ...input, games })].map(([teamId, { record }]) => ({ teamId, record }));
+    expect(() => selectField({ ...input, games, records })).toThrow(/Colley ratings disagree/);
+    const roster = input.teams.map(t => t.teamId === "FCS" ? { ...t, membership: "other" as const } : t);
+    const otherRecords = [...computeEligibility({ ...input, teams: roster })]
+      .map(([teamId, { record }]) => ({ teamId, record }));
+    expect(() => selectField({ ...input, teams: roster, records: otherRecords })).toThrow(/Colley ratings disagree/);
   });
 
   test("minimum four, exact eligibility, routes, no extra Colley top-up and short field", () => {
@@ -72,7 +92,7 @@ describe("stage 1", () => {
   });
 
   test("exact .85 starts a play-in after four bids; threshold decisions use Colley's predicate", () => {
-    const input = fixture({ A: .95, B: .94, C: .93, D: .92, E: .85, F: .84999999 });
+    const input = fixture({ A: .95, B: .94, C: .93, D: .92, E: .84, F: .83999999 });
     const meetsThreshold = input.ratings.meetsThreshold;
     input.ratings.meetsThreshold = (id, threshold) => id === "E" && threshold === "0.85" ||
       (id !== "E" && meetsThreshold(id, threshold));
@@ -80,6 +100,11 @@ describe("stage 1", () => {
     expect(r.initialPlayin).toEqual(["E"]);
     expect(r.teams.find(t => t.teamId === "E")?.originalRoute).toBe("rating_playin");
     expect(r.teams.find(t => t.teamId === "F")?.originalRoute).toBe("outside");
+    const bidInput = fixture({ A: .89, B: .95, C: .94, D: .93, E: .92 });
+    const bidThreshold = bidInput.ratings.meetsThreshold;
+    bidInput.ratings.meetsThreshold = (id, threshold) => id === "A" && threshold === "0.90" ||
+      (id !== "A" && bidThreshold(id, threshold));
+    expect(selectField(bidInput).teams.find(t => t.teamId === "A")?.originalRoute).toBe("rating_bid");
   });
 
   test("poll tie breaks by Colley; ineligible 8-4 is skipped even if field stays short", () => {
@@ -89,6 +114,17 @@ describe("stage 1", () => {
     expect(result.initialPlayin).toEqual(["F", "G"]);
     expect(result.shortField).toBe(true);
     expect(result.teams.find(t => t.teamId === "E")?.finalCategory).toBe("outside");
+  });
+
+  test("one remaining poll slot resolves equal ranks by Colley, not input order", () => {
+    const ratings = Object.fromEntries(Array.from({ length: 11 }, (_, i) => [`B${i}`, .95 - i * .001]));
+    const poll = [{ teamId: "LOW", rank: 12 }, { teamId: "HIGH", rank: 12 }];
+    const input = fixture({ ...ratings, HIGH: .82, LOW: .81 }, [], { poll });
+    const result = selectField(input);
+    expect(result.initialBid).toHaveLength(11);
+    expect(result.initialPlayin).toEqual(["HIGH"]);
+    expect(result.teams.find(t => t.teamId === "LOW")?.originalRoute).toBe("outside");
+    expect(selectField({ ...input, pollEntries: [...poll].reverse() })).toEqual(result);
   });
 
   test("computed exact .90 and .85 decisions are used rather than rounded display ratings", () => {

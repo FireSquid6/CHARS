@@ -98,6 +98,13 @@ describe("Colley FBS-only universe", () => {
       expect(() => computeEligibility(mixed)).toThrow(/Wrong-season game/);
     }
   });
+
+  test("rejects duplicate provider game identity even when local IDs differ or games are excluded", () => {
+    const input = { season, teams: teams("A", "B"), games: [game("one", "A", "B", 1, 0),
+      game("two", "B", "A", 0, 1, { providerGameId: "one", applicationGameType: "bowl" })] };
+    expect(() => computeColley(input)).toThrow(/provider game ID/);
+    expect(() => computeEligibility(input)).toThrow(/provider game ID/);
+  });
 });
 
 test("eligibility floor is exact with ties and excludes zero games", () => {

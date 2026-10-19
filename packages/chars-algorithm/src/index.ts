@@ -6,7 +6,7 @@ export const SOLVER_VERSION = "scenarios-v1" as const;
 
 export { computeColley } from "./colley";
 export type { ColleyResult, ColleyTeamRating } from "./colley";
-export { computeEligibility, includedRegularGames, recordIsEligible } from "./eligibility";
+export { colleyInputFingerprint, computeEligibility, includedRegularGames, recordIsEligible } from "./eligibility";
 export type { SeasonGames, IncludedGame } from "./eligibility";
 export { buildHeadToHead } from "./head-to-head";
 export type { HeadToHeadEdge, HeadToHeadGraph } from "./head-to-head";
