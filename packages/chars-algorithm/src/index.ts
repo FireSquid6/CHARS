@@ -16,6 +16,8 @@ export { seedField } from "./seeding";
 export type { SeedingEdge, SeededTeam, SeedingResult } from "./seeding";
 export { buildBracket, computePlayoff, standardSeedOrder } from "./brackets";
 export type { PlayinPair, MainSlot, MainMatch, BracketEntry, BracketResult } from "./brackets";
+export { computeScenarios } from "./scenarios";
+export type { ScenarioInput, ScenarioResult } from "./scenarios";
 
 export type SeasonState = "preseason" | "current" | "final" | "incomplete";
 export type Membership = "fbs" | "fcs" | "other";
