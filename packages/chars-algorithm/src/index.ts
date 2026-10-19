@@ -8,6 +8,10 @@ export { computeColley } from "./colley";
 export type { ColleyResult, ColleyTeamRating } from "./colley";
 export { computeEligibility, includedRegularGames, recordIsEligible } from "./eligibility";
 export type { SeasonGames, IncludedGame } from "./eligibility";
+export { buildHeadToHead } from "./head-to-head";
+export type { HeadToHeadEdge, HeadToHeadGraph } from "./head-to-head";
+export { selectField } from "./selection";
+export type { SelectionInput, SelectedTeam, SelectionSwap, SelectionResult as FieldSelectionResult } from "./selection";
 
 export type SeasonState = "preseason" | "current" | "final" | "incomplete";
 export type Membership = "fbs" | "fcs" | "other";
