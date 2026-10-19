@@ -19,8 +19,7 @@ export function SnapshotControls({ base, options, selected, search, view }: {
     <form action={base} method="get" className="controls-form">
       {search && <input type="hidden" name="q" value={search} />}
       {view === "eligible" && <input type="hidden" name="view" value={view} />}
-      <label htmlFor="week">Snapshot</label><select id="week" name="week" value={selected ?? ""}
-        onChange={event => event.currentTarget.form?.requestSubmit()}>
+      <label htmlFor="week">Snapshot</label><select id="week" name="week" defaultValue={selected ?? ""}>
         {!selected && <option value="" disabled>Choose a published snapshot</option>}
         {options.map(option => <option key={option.key} value={option.key}>{label(option)}{option.publicationState !== "current" ? ` · ${option.publicationState}` : ""}</option>)}
       </select><button type="submit">View snapshot</button>
@@ -39,7 +38,7 @@ export function RankingControls({ base, week, search, eligibleOnly }: {
   return <div className="controls"><form action={base} method="get" role="search" className="controls-form">
     {week && <input type="hidden" name="week" value={week} />}
     <label htmlFor="team-search">Find a team</label><input id="team-search" type="search" name="q" defaultValue={search} placeholder="Team name or abbreviation" />
-    <label htmlFor="view">Teams</label><select id="view" name="view" defaultValue={eligibleOnly ? "eligible" : "all"} onChange={event => event.currentTarget.form?.requestSubmit()}>
+    <label htmlFor="view">Teams</label><select id="view" name="view" defaultValue={eligibleOnly ? "eligible" : "all"}>
       <option value="all">All FBS (including ineligible)</option><option value="eligible">Eligible only</option>
     </select><button type="submit">Apply</button>
   </form></div>;

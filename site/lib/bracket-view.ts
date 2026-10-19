@@ -31,6 +31,24 @@ function source(value: string | null): Source | null {
 export function bracketView(rows: BracketRow[], teams: BracketTeam[]): BracketView {
   const names = new Map(teams.map(team => [team.id, team.name]));
   const categories = new Map(teams.map(team => [team.id, team.category]));
+  const selected = teams.filter(team => team.category !== "outside");
+  const roundZero = rows.filter(row => row.round === 0);
+  if (selected.length && !roundZero.length) throw new Error("Missing published round-zero slots");
+  const seenTeams = new Set<string>();
+  for (const [index, row] of [...roundZero].sort((a, b) => a.position - b.position).entries()) {
+    if (row.position !== index || row.seed !== index + 1 || row.team_a_id === null || row.is_bye !== 0 || row.source_slot_b !== null)
+      throw new Error("Invalid published round-zero seed positions");
+    for (const id of [row.team_a_id, row.team_b_id]) {
+      if (id === null) continue;
+      if (categories.get(id) === undefined || categories.get(id) === "outside" || seenTeams.has(id))
+        throw new Error("Published bracket teams disagree with selected rankings");
+      seenTeams.add(id);
+    }
+    if (row.team_b_id !== null && (categories.get(row.team_a_id) !== "playin" || categories.get(row.team_b_id) !== "playin" || !row.source_slot_a))
+      throw new Error("Invalid published play-in pair");
+    if (row.team_b_id === null && row.source_slot_a !== null) throw new Error("Invalid published singleton slot");
+  }
+  if (seenTeams.size !== selected.length) throw new Error("Published bracket teams disagree with selected rankings");
   const name = (id: string | null) => id === null ? "Unknown team" : names.get(id) ?? id;
   const slots = rows.filter(row => row.round === 0).sort((a, b) => a.position - b.position).map(row => {
     if (row.seed === null || row.team_a_id === null) throw new Error("Invalid published main slot");
@@ -62,6 +80,9 @@ export function bracketView(rows: BracketRow[], teams: BracketTeam[]): BracketVi
         seen.add(id);
         return { id, label: `Round ${number}, matchup ${row.position + 1}`, sides, bye: Boolean(row.is_bye) };
       }) }));
+  if (slots.length > 1 && (!rounds.length || rounds.at(-1)?.matches.length !== 1))
+    throw new Error("Missing published main bracket rounds");
+  if (slots.length <= 1 && rounds.length) throw new Error("Unexpected published main bracket rounds");
   const finalMatch = rounds.at(-1)?.matches[0];
   return { slots: slots.map(({ seed, label, pairId }) => ({ seed, label, pairId })),
     playins: slots.filter(slot => slot.second !== null).map(slot => ({ id: slot.pairId ?? `seed-${slot.seed}`, seed: slot.seed, first: slot.first, second: slot.second! })),

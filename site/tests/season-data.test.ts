@@ -84,6 +84,11 @@ test("readers use published revision, allow exact historical key and disclose st
     const oldest = renderToStaticMarkup(await SeasonPage({ params: Promise.resolve({ year: "2020" }),
       searchParams: Promise.resolve({ week: "2020:week:1" }) }));
     expect(oldest).toContain("aria-disabled=\"true\">← Older");
+    expect(oldest).toContain("Selection category");
+    expect(oldest).toContain("Provisional · Direct bid");
+    expect(oldest).not.toContain("onchange=");
+    expect(oldest).toContain("View snapshot");
+    expect(oldest).toContain("Apply");
     db.query("UPDATE snapshot_publications SET state='pending' WHERE snapshot_key='2020:week:1'").run();
     expect(getSeasonData(2020).pending).toBe(true);
     expect(getSeasonData(2020, "2020:week:1").snapshot?.publicationState).toBe("pending");
@@ -96,7 +101,36 @@ test("readers use published revision, allow exact historical key and disclose st
     db.query("UPDATE snapshot_publications SET state='stale' WHERE snapshot_key='2020:selection-final'").run();
     expect(getSeasonData(2020).state).toBe("incomplete");
     expect(getSeasonData(2020).snapshot).toMatchObject({ key: "2020:selection-final", revision: 1, publicationState: "stale" });
+    expect(getSeasonData(2020).bracket?.slots[0]?.label).toBe("Alpha");
     expect(getSeasonData(2020, "2020:selection-final").snapshot?.publicationState).toBe("stale");
+    const retained = renderToStaticMarkup(await SeasonPage({ params: Promise.resolve({ year: "2020" }),
+      searchParams: Promise.resolve({}) }));
+    expect(retained).toContain("Retained stale bracket");
+    expect(retained).toContain("Seed 1</span> Alpha");
+    expect(retained).toContain("Retained final · Direct bid");
+    db.query("DELETE FROM bracket_slots WHERE snapshot_key='2020:selection-final' AND snapshot_revision=1").run();
+    const missing = getSeasonData(2020);
+    expect(missing.bracket).toBeNull();
+    expect(missing.bracketIssue).toContain("round-zero");
+    expect(missing.rankings).toHaveLength(2);
+    const missingPage = renderToStaticMarkup(await SeasonPage({ params: Promise.resolve({ year: "2020" }),
+      searchParams: Promise.resolve({}) }));
+    expect(missingPage).toContain("Bracket unavailable");
+    expect(missingPage).toContain("All FBS teams");
+    expect(missingPage).toContain("View snapshot");
+    db.query(`INSERT INTO bracket_slots (snapshot_key,snapshot_revision,round,position,seed,team_a_id,is_bye)
+      VALUES ('2020:selection-final',1,0,0,1,'A',0)`).run();
+    db.query(`INSERT INTO bracket_slots (snapshot_key,snapshot_revision,round,position,source_slot_a,is_bye)
+      VALUES ('2020:selection-final',1,1,0,'not-json',1)`).run();
+    const corrupt = getSeasonData(2020);
+    expect(corrupt.bracket).toBeNull();
+    expect(corrupt.bracketIssue).toContain("invalid or incomplete");
+    expect(corrupt.rankings[0]?.name).toBe("Alpha");
+    const corruptPage = renderToStaticMarkup(await SeasonPage({ params: Promise.resolve({ year: "2020" }),
+      searchParams: Promise.resolve({ q: "bet" }) }));
+    expect(corruptPage).toContain("Bracket unavailable");
+    expect(corruptPage).toContain("Beta");
+    expect(corruptPage).toContain("name=\"q\" value=\"bet\"");
     db.query("UPDATE snapshot_publications SET state='stale' WHERE snapshot_key='2020:week:1'").run();
     expect(getSeasonData(2020, "2020:week:1").snapshot?.publicationState).toBe("stale");
   } finally { db.close(); }

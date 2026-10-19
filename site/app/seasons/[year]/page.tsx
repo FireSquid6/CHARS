@@ -76,21 +76,20 @@ export default async function SeasonPage({ params, searchParams }: {
         {selected.kind !== "selection_final" && <section className="status-pending" aria-label="Mathematical status pending">
           <h2>Playoff status · pending computation</h2><p>Eliminated · Needs help · Controls destiny · Clinched: no mathematical classifications are published for this snapshot. Provisional selections below are not elimination or clinch proofs.</p>
         </section>}
-        {data.bracket && <Bracket bracket={data.bracket} />}
-        {selected.kind === "selection_final" && selected.coverage.complete && selected.publicationState === "current" && !data.bracket &&
-          <aside className="notice" role="status">Published bracket slots are unavailable for this revision; no matchup is inferred.</aside>}
+        {data.bracket && <Bracket bracket={data.bracket} stale={selected.publicationState === "stale"} />}
+        {data.bracketIssue && <aside className="notice" role="status"><strong>Bracket unavailable</strong><p>{data.bracketIssue} Rankings and snapshot controls remain available.</p></aside>}
         <section aria-labelledby="ranking-title">
           <div className="section-head"><h2 id="ranking-title">{eligibleOnly ? "Eligible FBS rankings" : "All FBS teams"}</h2><span>{visible.length} shown · {data.rankings.length} FBS teams</span></div>
           <RankingControls base={base} week={selected.key} search={search} eligibleOnly={eligibleOnly} />
           <div className="table-wrap" role="region" aria-label="Scrollable FBS rankings" tabIndex={0}>
             <table><caption className="sr-only">Published Colley rankings and selection categories</caption>
               <thead><tr><th scope="col">Raw rank</th><th scope="col">Team</th><th scope="col">Adjusted</th><th scope="col">Rating</th>
-                <th scope="col">W–L–T</th><th scope="col">Pct</th><th scope="col">Final category</th><th scope="col">Initial route / reason</th></tr></thead>
+                <th scope="col">W–L–T</th><th scope="col">Pct</th><th scope="col">Selection category</th><th scope="col">Initial route / reason</th></tr></thead>
               <tbody>{visible.map(team => <tr key={team.teamId}>
                 <td>{team.colleyRank}</td><th scope="row" className="team">{team.name}{team.abbreviation && <span className="subtle"> ({team.abbreviation})</span>}</th>
                 <td>{team.adjustedRank ?? "—"}</td><td>{team.rating.toFixed(6)}</td>
                 <td>{team.wins}–{team.losses}–{team.ties}</td><td>{percentage(team)}</td>
-                 <td><span className={`badge ${team.finalCategory}`}>{selected.kind === "selection_final" && selected.coverage.complete && selected.publicationState === "current" ? "Final · " : "Provisional · "}{team.finalCategory === "playin" ? "Play-in" : team.finalCategory === "bid" ? "Direct bid" : "Outside"}</span></td>
+                 <td><span className={`badge ${team.finalCategory}`}>{selected.kind === "selection_final" && selected.coverage.complete ? selected.publicationState === "stale" ? "Retained final · " : selected.publicationState === "current" ? "Final · " : "Provisional · " : "Provisional · "}{team.finalCategory === "playin" ? "Play-in" : team.finalCategory === "bid" ? "Direct bid" : "Outside"}</span></td>
                 <td className="explanation">{routeLabels[team.originalRoute] ?? team.originalRoute}{!team.eligible ? ` · ${team.eligibilityReason ?? "Below .750"}` : ""}</td>
               </tr>)}</tbody>
             </table>{visible.length === 0 && <p className="empty">No matching teams in this view.</p>}

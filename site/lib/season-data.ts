@@ -24,7 +24,8 @@ export function filterRankings(rankings: Ranking[], search: string, eligibleOnly
 export type Swap = { sequence: number; winner: string; loser: string; supportingGameIds: string[];
   winnerBefore: string; loserBefore: string };
 export type SeasonData = { year: number; state: SeasonState; options: SnapshotOption[]; snapshot: SnapshotOption | null;
-  rankings: Ranking[]; swaps: Swap[]; bracket: BracketView | null; issue: string | null; lastSync: string | null; pending: boolean };
+  rankings: Ranking[]; swaps: Swap[]; bracket: BracketView | null; bracketIssue: string | null;
+  issue: string | null; lastSync: string | null; pending: boolean };
 
 type DbSnapshot = { snapshot_key: string; revision: number; week: number | null; kind: SnapshotOption["kind"];
   game_cutoff_utc: string; poll_cutoff_utc: string | null; published_at_utc: string;
@@ -149,7 +150,7 @@ export function getHomeData(now = new Date()): { seasons: SeasonCard[]; setup: s
 export function getSeasonData(year: number, requestedWeek?: string): SeasonData {
   const { db, issue } = openReadOnly();
   const empty = (message: string): SeasonData => ({ year, state: year === currentFootballSeason() ? "preseason" : "incomplete",
-    options: [], snapshot: null, rankings: [], swaps: [], bracket: null, issue: message, lastSync: null, pending: false });
+    options: [], snapshot: null, rankings: [], swaps: [], bracket: null, bracketIssue: null, issue: message, lastSync: null, pending: false });
   if (!db) return empty(issue ?? "Database unavailable");
   try {
     // One consistent WAL read: ranking rows and the pointer always refer to the same publication.
@@ -179,16 +180,27 @@ export function getSeasonData(year: number, requestedWeek?: string): SeasonData 
         return { sequence: row.sequence, winner: event.winnerTeamId, loser: event.loserTeamId,
           supportingGameIds: event.supportingGameIds, winnerBefore: event.winnerBefore, loserBefore: event.loserBefore };
        }) : [];
-       const bracketRows = snapshot?.kind === "selection_final" && snapshot.publicationState === "current" && snapshot.coverage.complete ?
+       const showBracket = snapshot?.kind === "selection_final" && snapshot.coverage.complete &&
+         (snapshot.publicationState === "current" || snapshot.publicationState === "stale");
+       const bracketRows = showBracket ?
          db.query<BracketRow, [string, number]>(`SELECT round, position, seed, team_a_id, team_b_id,
            source_slot_a, source_slot_b, is_bye FROM bracket_slots
            WHERE snapshot_key=? AND snapshot_revision=? ORDER BY round, position`).all(snapshot.key, snapshot.revision) : [];
-       const bracket = snapshot?.kind === "selection_final" && snapshot.publicationState === "current" && snapshot.coverage.complete &&
-         (bracketRows.length > 0 || !rankings.some(row => row.finalCategory !== "outside")) ?
-         bracketView(bracketRows, rankings.map(row => ({ id: row.teamId, name: row.name, abbreviation: row.abbreviation, category: row.finalCategory }))) : null;
+       let bracket: BracketView | null = null;
+       let bracketIssue: string | null = null;
+       if (showBracket) {
+         try {
+           bracket = bracketView(bracketRows, rankings.map(row => ({ id: row.teamId, name: row.name,
+             abbreviation: row.abbreviation, category: row.finalCategory })));
+         } catch {
+           bracketIssue = bracketRows.some(row => row.round === 0) ?
+             "Published bracket slots are invalid or incomplete for this revision; no matchup is inferred." :
+             "Published round-zero bracket slots are missing for this revision; no matchup is inferred.";
+         }
+       }
       const sync = db.query<{ ended_at_utc: string }, []>("SELECT ended_at_utc FROM sync_runs WHERE state='success' ORDER BY ended_at_utc DESC LIMIT 1").get();
       return { year, state: seasonState(year, options, seasonFromCalendar(db, new Date())), options, snapshot,
-         rankings: rankings.map(row => ({ ...row, eligible: Boolean(row.eligible) })), swaps, bracket,
+          rankings: rankings.map(row => ({ ...row, eligible: Boolean(row.eligible) })), swaps, bracket, bracketIssue,
         issue: requestedWeek !== undefined && !selected ? "That snapshot key is not published for this season." :
           !snapshot ? "No published snapshot for this season. Backfill and rebuild snapshots before viewing rankings." : null,
         lastSync: sync?.ended_at_utc ?? null, pending };
