@@ -2,7 +2,7 @@ export const POLICY_VERSION = "selection-v1" as const;
 export const MODEL_VERSION = "colley-fbs-only-v1" as const;
 export const CALENDAR_POLICY_VERSION = "pre-ccg-weekend-v1" as const;
 export const POLL_MODEL_VERSION = "all-eligible-poll-orders-v1" as const;
-export const SOLVER_VERSION = "scenarios-v3-restart-only" as const;
+export const SOLVER_VERSION = "scenarios-v4-indexed-frontier" as const;
 
 export { computeColley } from "./colley";
 export type { ColleyResult, ColleyTeamRating } from "./colley";
@@ -17,7 +17,7 @@ export type { SeedingEdge, SeededTeam, SeedingResult } from "./seeding";
 export { buildBracket, computePlayoff, standardSeedOrder } from "./brackets";
 export type { PlayinPair, MainSlot, MainMatch, BracketEntry, BracketResult } from "./brackets";
 export { computeScenarios } from "./scenarios";
-export type { ScenarioInput, ScenarioResult } from "./scenarios";
+export type { ScenarioInput, ScenarioResult, ScenarioCheckpoint } from "./scenarios";
 
 export type SeasonState = "preseason" | "current" | "final" | "incomplete";
 export type Membership = "fbs" | "fcs" | "other";

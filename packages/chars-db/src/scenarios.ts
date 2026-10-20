@@ -2,7 +2,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import { computeScenarios, POLL_MODEL_VERSION, SOLVER_VERSION,
-  type Game, type ScenarioInput, type SnapshotIdentity, type TeamSeason } from "chars-algorithm";
+  type Game, type ScenarioCheckpoint, type ScenarioInput, type SnapshotIdentity, type TeamSeason } from "chars-algorithm";
 import { configFromEnv, openDatabase, transaction } from "./index";
 import { migrate } from "./migrate";
 
@@ -10,7 +10,8 @@ type SnapshotRow = { snapshot_key: string; revision: number; season: number; kin
   game_cutoff_utc: string; input_hash: string; policy_version: string; model_version: string;
   calendar_policy_version: string; coverage_json: string; state: string };
 type Job = { id: string; state: string; input_hash: string; input_generation: number;
-  checkpoint_json: string | null; lease_owner: string | null; lease_expires_utc: string | null };
+  checkpoint_json: string | null; evaluated_completions: number;
+  lease_owner: string | null; lease_expires_utc: string | null };
 type Budget = { maxCompletions: number; maxRuntimeMs: number; maxTrackedPollPaths: number;
   allowHistoricalTies?: boolean };
 export type QueueFence = { owner: string; revision: number };
@@ -106,23 +107,16 @@ export function solveSnapshot(db: Database, key: string, budget: Budget = {
       db.query(`INSERT INTO scenario_jobs (id,snapshot_key,snapshot_revision,poll_model_version,
         solver_version,input_hash,state,checkpoint_json,created_at_utc,updated_at_utc,input_generation,budget_json)
         VALUES (?,?,?,?,?,?,'pending',?, ?,?,?,?)`).run(jobId, key, input.snapshot.revision,
-        POLL_MODEL_VERSION, SOLVER_VERSION, inputHash, JSON.stringify({ mode: "restart-only", lastEvaluated: 0 }), now, now,
+        POLL_MODEL_VERSION, SOLVER_VERSION, inputHash, null, now, now,
         generation, JSON.stringify(budget));
       row = one<Job>(db, "SELECT * FROM scenario_jobs WHERE id=?", jobId)!;
     }
     if (row.state === "proved" || row.state === "unsupported") return row;
-    if (row.checkpoint_json !== null) {
-      const checkpoint: unknown = JSON.parse(row.checkpoint_json);
-      if (!checkpoint || typeof checkpoint !== "object" || Array.isArray(checkpoint) ||
-        (checkpoint as { mode?: unknown }).mode !== "restart-only" ||
-        !Number.isSafeInteger((checkpoint as { lastEvaluated?: number }).lastEvaluated) ||
-        (checkpoint as { lastEvaluated: number }).lastEvaluated < 0 ||
-        "nextCompletion" in checkpoint ||
-        (checkpoint as { lastEvaluated: number }).lastEvaluated !==
-          one<{ evaluated_completions: number }>(db,
-            "SELECT evaluated_completions FROM scenario_jobs WHERE id=?", jobId)?.evaluated_completions)
-        throw new Error("Unverified scenario checkpoint; cannot resume or publish");
-    }
+    if (row.checkpoint_json !== null &&
+      (JSON.parse(row.checkpoint_json) as ScenarioCheckpoint).payload?.evaluated !== row.evaluated_completions)
+      throw new Error("Unverified scenario checkpoint; cannot resume or publish");
+    if (row.checkpoint_json === null && row.evaluated_completions !== 0)
+      throw new Error("Missing scenario checkpoint; cannot resume or publish");
     if (row.lease_expires_utc && row.lease_expires_utc > now && row.lease_owner !== owner)
       throw new Error("Scenario job already leased");
     db.query(`UPDATE scenario_jobs SET state='running',lease_owner=?,lease_expires_utc=?,
@@ -133,15 +127,17 @@ export function solveSnapshot(db: Database, key: string, budget: Budget = {
   });
   if (job.state === "proved" || job.state === "unsupported") return { jobId, state: job.state, evaluated: 0 };
   try {
-    const result = computeScenarios({ ...input, ...budget });
+    const result = computeScenarios({ ...input, ...budget,
+      checkpoint: job.checkpoint_json ? JSON.parse(job.checkpoint_json) as ScenarioCheckpoint : undefined });
     beforePublish?.();
     transaction(db, () => {
       guard();
       const current = one<Job>(db, "SELECT * FROM scenario_jobs WHERE id=?", jobId);
       if (current?.lease_owner !== owner || !current.lease_expires_utc || current.lease_expires_utc <= new Date().toISOString())
         throw new Error("Scenario lease lost or expired");
-      // An earlier attempt has no certified prefix. Its witnesses cannot
-      // contribute to the new run's exhaustive classification.
+      if (result.nextCompletion < job.evaluated_completions ||
+        result.nextCompletion !== job.evaluated_completions + result.evaluatedCompletions)
+        throw new Error("Scenario checkpoint did not advance monotonically");
       db.query("DELETE FROM scenario_witnesses WHERE job_id=?").run(jobId);
       db.query("DELETE FROM scenario_statuses WHERE job_id=?").run(jobId);
       for (const proof of result.proofs) {
@@ -157,9 +153,8 @@ export function solveSnapshot(db: Database, key: string, budget: Budget = {
       const state = result.complete ? result.proofs.some(p => p.state === "unsupported") ? "unsupported" : "proved" : "pending";
       db.query(`UPDATE scenario_jobs SET state=?, checkpoint_json=?,evaluated_completions=?,
         lease_owner=NULL,lease_expires_utc=NULL,updated_at_utc=? WHERE id=?`).run(state,
-        JSON.stringify({ mode: "restart-only", lastEvaluated: result.evaluatedCompletions,
-          pendingReason: result.pendingReason, possibleCompletions: result.possibleCompletions }),
-        result.evaluatedCompletions, new Date().toISOString(), jobId);
+         result.checkpoint ? JSON.stringify(result.checkpoint) : null,
+         result.nextCompletion, new Date().toISOString(), jobId);
     });
     return { jobId, state: result.complete ? result.proofs.some(p => p.state === "unsupported") ?
       "unsupported" : "proved" : "pending", evaluated: result.evaluatedCompletions,

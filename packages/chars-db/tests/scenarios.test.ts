@@ -19,7 +19,8 @@ async function fixture() {
   db.query("INSERT INTO season_input_generations VALUES (2026,1)").run();
   db.query(`INSERT INTO season_ingestion_gaps (season,observed_at_utc,coverage_json,selection_freeze_utc)
     VALUES (2026,'2026-10-02T00:00:00.000Z',?,'2026-12-01T00:00:00.000Z')`).run(coverage);
-  for (const id of ["A", "B", "FCS"]) {
+  const fillers = Array.from({ length: 11 }, (_, i) => `C${String(i).padStart(2, "0")}`);
+  for (const id of ["A", "B", ...fillers, "FCS"]) {
     db.query("INSERT INTO teams (id,name) VALUES (?,?)").run(id, id);
     db.query("INSERT INTO team_seasons (season,team_id,membership) VALUES (2026,?,?)")
       .run(id, id === "FCS" ? "fcs" : "fbs");
@@ -37,6 +38,7 @@ async function fixture() {
   };
   game("a1", "A", "FCS", false); game("a2", "A", "FCS", false);
   game("b1", "B", "FCS", false); game("b2", "B", "FCS", false);
+  for (const id of fillers) game(`f${id}`, id, "FCS", false);
   game("future", "A", "B", true);
   db.query(`INSERT INTO snapshots (snapshot_key,revision,season,week,kind,game_cutoff_utc,
     input_hash,policy_version,model_version,calendar_policy_version,coverage_json)
@@ -44,12 +46,12 @@ async function fixture() {
       'selection-v1','colley-fbs-only-v1','pre-ccg-weekend-v1','{"complete":true}')`).run();
   db.query(`INSERT INTO snapshot_publications (snapshot_key,revision,published_at_utc,state)
     VALUES ('week',1,'2026-10-02T00:00:00.000Z','current')`).run();
-  for (const id of ["a1", "a2", "b1", "b2"])
+  for (const id of ["a1", "a2", "b1", "b2", ...fillers.map(id => `f${id}`)])
     db.query("INSERT INTO snapshot_games VALUES ('week',1,?,1)").run(id);
   return { db, game, path: join(path, "test.db") };
 }
 
-test("bounded retries restart; only exhaustive run publishes terminal labels atomically", async () => {
+test("bounded retries resume certified frontier; only exhaustive run publishes terminal labels atomically", async () => {
   const { db } = await fixture();
   try {
     const budget = { maxCompletions: 1, maxRuntimeMs: 10000, maxTrackedPollPaths: 100 };
@@ -59,13 +61,13 @@ test("bounded retries restart; only exhaustive run publishes terminal labels ato
     expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM scenario_statuses WHERE state='proved'").get()?.n).toBe(0);
     const second = solveSnapshot(db, "week", budget);
     expect(second.jobId).toBe(first.jobId);
-    expect(second.state).toBe("pending");
+    expect(second.state).toBe("proved");
     expect(second.evaluated).toBe(1);
     const exhaustive = solveSnapshot(db, "week", { ...budget, maxCompletions: 2 });
     expect(exhaustive.state).toBe("proved");
-    expect(exhaustive.evaluated).toBe(2);
+    expect(exhaustive.evaluated).toBe(0);
     expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM scenario_witnesses").get()?.n).toBeGreaterThan(0);
-    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM scenario_statuses WHERE state='proved'").get()?.n).toBe(2);
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM scenario_statuses WHERE state='proved'").get()?.n).toBe(13);
     const proof = db.query<{ proof_metadata_json: string }, []>(
       "SELECT proof_metadata_json FROM scenario_statuses WHERE team_id='A'").get();
     expect(JSON.parse(proof!.proof_metadata_json).evaluatedCompletions).toBe(2);
@@ -135,18 +137,18 @@ test("memory interruption and smaller budgets never carry partial-leaf witnesses
   const { db } = await fixture();
   try {
     const stopped = solveSnapshot(db, "week", { maxCompletions: 2, maxRuntimeMs: 10000,
-      maxTrackedPollPaths: 1 });
+       maxTrackedPollPaths: 1 });
     expect(stopped.state).toBe("pending");
-    expect(stopped.evaluated).toBe(1);
+    expect(stopped.evaluated).toBe(0);
     expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM scenario_statuses WHERE state='proved'").get()?.n).toBe(0);
     const retry = solveSnapshot(db, "week", { maxCompletions: 1, maxRuntimeMs: 10000,
-      maxTrackedPollPaths: 2 });
+       maxTrackedPollPaths: 13 });
     expect(retry.state).toBe("pending");
     expect(retry.evaluated).toBe(1);
     const done = solveSnapshot(db, "week", { maxCompletions: 2, maxRuntimeMs: 10000,
-      maxTrackedPollPaths: 2 });
+       maxTrackedPollPaths: 26 });
     expect(done.state).toBe("proved");
-    expect(done.evaluated).toBe(2);
+    expect(done.evaluated).toBe(1);
   } finally { db.close(); }
 });
 
@@ -155,14 +157,18 @@ test("tampered persisted cursor is rejected; failed run releases its lease", asy
   try {
     const budget = { maxCompletions: 1, maxRuntimeMs: 10000, maxTrackedPollPaths: 100 };
     const first = solveSnapshot(db, "week", budget);
+    const original = db.query<{ checkpoint_json: string }, [string]>(
+      "SELECT checkpoint_json FROM scenario_jobs WHERE id=?").get(first.jobId)!.checkpoint_json;
     db.query("UPDATE scenario_jobs SET checkpoint_json=? WHERE id=?")
-      .run(JSON.stringify({ mode: "restart-only", lastEvaluated: 1, nextCompletion: 999 }), first.jobId);
+      .run(JSON.stringify({ payload: { evaluated: 1, gameIndex: "999" }, digest: "false" }), first.jobId);
     expect(() => solveSnapshot(db, "week", budget)).toThrow(/Unverified scenario checkpoint/);
     expect(db.query<{ lease_owner: string | null; state: string }, [string]>(
       "SELECT lease_owner,state FROM scenario_jobs WHERE id=?").get(first.jobId))
       .toMatchObject({ lease_owner: null, state: "pending" });
-    db.query("UPDATE scenario_jobs SET checkpoint_json=? WHERE id=?")
-      .run(JSON.stringify({ mode: "restart-only", lastEvaluated: 1 }), first.jobId);
+    // Restore a genuine checkpoint from the first indexed leaf.
+    const firstPayload = JSON.parse(original);
+    expect(firstPayload.payload.evaluated).toBe(1);
+    db.query("UPDATE scenario_jobs SET checkpoint_json=? WHERE id=?").run(original, first.jobId);
     expect(() => solveSnapshot(db, "week", budget, () => { throw new Error("publication fault"); }))
       .toThrow("publication fault");
     expect(db.query<{ lease_owner: string | null; state: string }, [string]>(
@@ -201,4 +207,26 @@ test("correction during publication rolls back; new generation has independent j
       VALUES ('week',1,'corrected','future','2026-10-03T00:00:00.000Z')`).run();
     expect(() => solveSnapshot(db, "week")).toThrow(/invalidated/);
   } finally { db.close(); }
+});
+
+test("poll dependence survives a stored subset cursor across two connections", async () => {
+  const { db, path } = await fixture();
+  const peer = openDatabase({ path });
+  try {
+    db.query("UPDATE games SET status='cancelled' WHERE id='future'").run();
+    const budget = { maxCompletions: 2, maxRuntimeMs: 10000, maxTrackedPollPaths: 100 };
+    const first = solveSnapshot(db, "week", budget);
+    expect(first.state).toBe("pending");
+    expect(first.evaluated).toBe(2);
+    let current = first;
+    for (let i = 0; i < 10 && current.state === "pending"; i++)
+      current = solveSnapshot(peer, "week", budget);
+    expect(current.state).toBe("proved");
+    const row = peer.query<{ proof_metadata_json: string; label: string }, []>(
+      "SELECT proof_metadata_json,label FROM scenario_statuses WHERE team_id='C10'").get()!;
+    expect(row.label).toBe("needs_help");
+    expect(JSON.parse(row.proof_metadata_json).pollDependent).toBe(true);
+    expect(peer.query<{ evaluated_completions: number }, []>(
+      "SELECT evaluated_completions FROM scenario_jobs").get()?.evaluated_completions).toBe(9);
+  } finally { peer.close(); db.close(); }
 });

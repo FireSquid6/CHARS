@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
 import { computeScenarios, type Game, type ScenarioInput } from "../src/index";
+import { computeEligibility } from "../src/eligibility";
+import { computeColley } from "../src/colley";
+import { computePlayoff } from "../src/brackets";
 
 function fixture(ids: string[], completed: Record<string, string[]>, future: [string, string][] = [],
   season = 2026): ScenarioInput {
@@ -29,27 +32,24 @@ test("vacuous win-out, exhaustive clinched and eliminated certificates", () => {
   // Reverse one completed result: B finishes 2-1 and cannot be polled into the field.
   input.games.push({ ...input.games[0]!, id: "loss", providerGameId: "loss", homeTeamId: "FCS", awayTeamId: "B" });
   const result = computeScenarios(input);
-  expect(result.evaluatedCompletions).toBe(1);
+  expect(result.evaluatedCompletions).toBe(0);
   expect(result.proofs.find(p => p.teamId === "A")?.label).toBe("clinched");
   expect(result.proofs.find(p => p.teamId === "B")?.label).toBe("eliminated");
-  expect(result.proofs.find(p => p.teamId === "A")?.witnesses.map(w => w.kind)).toContain("qualifying_win_out");
-  expect(result.proofs.find(p => p.teamId === "B")?.witnesses.map(w => w.kind)).toContain("failing_win_out");
-  expect(JSON.parse(result.proofs[0]!.proofMetadata!).certificate).toBe("exhaustive poll-equivalence classes");
+  expect(JSON.parse(result.proofs[0]!.proofMetadata!).certificate).toBe("selection-aware eligible universe at most twelve");
 });
 
 test("current ineligibility recovers, and win-out controls destiny", () => {
   const input = fixture(["A", "B"], { A: ["FCS", "FCS"], B: ["FCS", "FCS"] }, [["A", "B"]]);
   expect(proof(input, "A").label).toBe("controls_destiny");
   expect(proof(input, "B").label).toBe("controls_destiny");
-  expect(proof(input, "A").witnesses).toHaveLength(3);
+  expect(proof(input, "A").witnesses).toHaveLength(0);
 });
 
 test("shared FBS game has one result, FCS games change records but not FBS Colley", () => {
   const input = fixture(["A", "B"], { A: ["FCS", "FCS"], B: ["FCS", "FCS"] }, [["A", "B"]]);
   const result = computeScenarios(input);
-  expect(result.evaluatedCompletions).toBe(2);
-  expect(result.proofs.find(p => p.teamId === "A")?.witnesses.find(w => w.kind === "qualifying_win_out")?.gameOutcomes)
-    .toEqual(result.proofs.find(p => p.teamId === "B")?.witnesses.find(w => w.kind === "failing")?.gameOutcomes);
+  expect(result.evaluatedCompletions).toBe(0);
+  expect(result.proofs.find(p => p.teamId === "A")?.label).toBe("controls_destiny");
   const againstFcs = fixture(["A"], { A: ["FCS", "FCS"] }, [["A", "FCS"]]);
   expect(proof(againstFcs, "A").label).toBe("controls_destiny");
 });
@@ -78,7 +78,8 @@ test("record proof survives exponential schedules and budget zero, with provenan
 });
 
 test("unverified cursors and prior witnesses cannot manufacture exhaustive proofs", () => {
-  const input = fixture(["A", "B"], { A: ["FCS", "FCS"], B: ["FCS", "FCS"] }, [["A", "B"]]);
+  const ids = Array.from({ length: 13 }, (_, i) => `T${i}`);
+  const input = fixture(ids, Object.fromEntries(ids.map(id => [id, ["FCS"]])), [["T0", "T1"]]);
   const first = computeScenarios({ ...input, maxCompletions: 1 });
   expect(first.complete).toBe(false);
   expect(first.proofs.every(p => p.label === null)).toBe(true);
@@ -87,11 +88,14 @@ test("unverified cursors and prior witnesses cannot manufacture exhaustive proof
     initialWitnesses, maxCompletions: 1 })).toThrow(/Unverified scenario cursor/);
   expect(() => computeScenarios({ ...input, startCompletion: 999, maxCompletions: 1 }))
     .toThrow(/Unverified scenario cursor/);
-  const retry = computeScenarios({ ...input, maxCompletions: 1 });
-  expect(retry.complete).toBe(false);
-  expect(retry.nextCompletion).toBe(1);
-  expect(computeScenarios({ ...input, maxCompletions: 2 }).proofs.map(p => p.label))
-    .toEqual(computeScenarios(input).proofs.map(p => p.label));
+  expect(() => computeScenarios({ ...input, checkpoint: { ...first.checkpoint!, digest: "tampered" } }))
+    .toThrow(/Unverified scenario checkpoint/);
+  expect(() => computeScenarios({ ...input, checkpoint: first.checkpoint!, games: input.games.slice(1) }))
+    .toThrow(/Unverified scenario checkpoint/);
+  let resumed = first;
+  while (!resumed.complete) resumed = computeScenarios({ ...input, games: [...input.games].reverse(),
+    checkpoint: resumed.checkpoint!, maxCompletions: 1 });
+  expect(resumed.proofs.map(p => p.label)).toEqual(computeScenarios(input).proofs.map(p => p.label));
 });
 
 test("poll-dependent needs help quantifies over all eligible poll orders, even with no games", () => {
@@ -110,26 +114,27 @@ test("poll-dependent needs help quantifies over all eligible poll orders, even w
 test("poll combinatorics and exhausted runtime remain pending, not a claimed label", () => {
   const ids = Array.from({ length: 30 }, (_, i) => `T${i}`);
   const input = fixture(ids, Object.fromEntries(ids.map(id => [id, ["FCS"]])));
-  const result = computeScenarios(input);
-  expect(result.pendingReason).toContain("cap");
-  expect(result.evaluatedCompletions).toBe(0);
+  const result = computeScenarios({ ...input, maxCompletions: 1 });
+  expect(result.pendingReason).toContain("budget");
+  expect(result.evaluatedCompletions).toBe(1);
   const incremental = computeScenarios({ ...input, maxCompletions: 1 });
   expect(incremental.evaluatedCompletions).toBe(1);
   expect(incremental.proofs.every(p => p.label === null)).toBe(true);
   expect(result.proofs.every(p => p.state === "pending" && p.label === null)).toBe(true);
   expect(result.assumptions).toContain("all eligible poll orders; terminal eligible FBS teams only, up to 25 distinct entries");
-  const timed = computeScenarios({ ...fixture(["A"], { A: ["FCS"] }), maxRuntimeMs: 0 });
+  const timed = computeScenarios({ ...fixture(ids, Object.fromEntries(ids.map(id => [id, ["FCS"]]))), maxRuntimeMs: 0 });
   expect(timed.proofs[0]?.state).toBe("pending");
-  const memory = computeScenarios({ ...fixture(["A", "B"],
-    { A: ["FCS", "FCS"], B: ["FCS", "FCS"] }, [["A", "B"]]), maxTrackedPollPaths: 1 });
+  const memory = computeScenarios({ ...fixture(ids,
+    Object.fromEntries(ids.map(id => [id, ["FCS"]])), [["T0", "T1"]]), maxTrackedPollPaths: 1 });
   expect(memory.pendingReason).toContain("memory budget");
   expect(memory.proofs.every(p => p.label === null)).toBe(true);
-  expect(memory.evaluatedCompletions).toBe(1);
-  const partialLeaf = fixture(["A", "B", "C"], { A: ["FCS"], B: ["FCS"], C: ["FCS"] });
+  expect(memory.evaluatedCompletions).toBe(0);
+  const small = ids.slice(0, 13);
+  const partialLeaf = fixture(small, Object.fromEntries(small.map(id => [id, ["FCS"]])));
   const stopped = computeScenarios({ ...partialLeaf, maxTrackedPollPaths: 2 });
   expect(stopped.evaluatedCompletions).toBe(0);
   expect(stopped.proofs.every(p => p.label === null)).toBe(true);
-  expect(computeScenarios({ ...partialLeaf, maxTrackedPollPaths: 3 }).proofs.map(p => p.label))
+  expect(computeScenarios({ ...partialLeaf, maxTrackedPollPaths: 13 }).proofs.map(p => p.label))
     .toEqual(computeScenarios(partialLeaf).proofs.map(p => p.label));
 });
 
@@ -137,7 +142,7 @@ test("historical ties require an explicit pre-overtime option", () => {
   const modern = fixture(["A"], {}, [["A", "FCS"]]);
   expect(() => computeScenarios({ ...modern, allowHistoricalTies: true })).toThrow(/before 1996/);
   const old = fixture(["A"], {}, [["A", "FCS"]], 1995);
-  expect(computeScenarios({ ...old, allowHistoricalTies: true }).evaluatedCompletions).toBe(3);
+  expect(computeScenarios({ ...old, allowHistoricalTies: true }).evaluatedCompletions).toBe(0);
 });
 
 test("unknown classification of a relevant pre-freeze game blocks even an apparent clinch", () => {
@@ -165,7 +170,7 @@ test("exclude late regular games and require a known pre-freeze future kickoff",
   const late = { ...future, kickoffUtc: "2026-12-02T00:00:00Z" };
   const result = computeScenarios({ ...input, games: [input.games[0]!, late] });
   expect(result.proofs[0]?.label).toBe("clinched");
-  expect(result.evaluatedCompletions).toBe(1);
+  expect(result.evaluatedCompletions).toBe(0);
   expect(computeScenarios({ ...input, games: [input.games[0]!, { ...future, kickoffUtc: null }] })
     .pendingReason).toContain("kickoff");
   expect(computeScenarios({ ...input, gameCutoffUtc: "2026-11-02T00:00:00Z" })
@@ -179,7 +184,7 @@ test("validate then discard irrelevant FCS-FCS games before the exponential cap"
     providerGameId: `irrelevant-${i}`, homeTeamId: "FCS", awayTeamId: "FCS2",
     status: "scheduled", completed: false, homeScore: null, awayScore: null,
     kickoffUtc: "2026-11-05T00:00:00Z" });
-  expect(computeScenarios(input).evaluatedCompletions).toBe(1);
+  expect(computeScenarios(input).evaluatedCompletions).toBe(0);
   input.games.push({ ...input.games.at(-1)!, id: "duplicate", providerGameId: "irrelevant-0" });
   expect(() => computeScenarios(input)).toThrow(/Duplicate\/empty provider game ID/);
 });
@@ -200,4 +205,60 @@ test("bounded exhaustive search has no constructible four-label coverage excepti
     searched++;
   }
   expect(searched).toBe(9);
+});
+
+test("independent direct-product oracle agrees on every quantified label and shared outcome", () => {
+  const ids = Array.from({ length: 13 }, (_, i) => `T${i}`);
+  const input = fixture(ids, Object.fromEntries(ids.map(id => [id, ["FCS"]])),
+    [["T0", "T1"], ["T2", "FCS"]]);
+  input.teams.push({ season: 2026, teamId: "X", membership: "fbs", conference: null });
+  input.games.push(...Array.from({ length: 4 }, (_, i) => ({ ...input.games[0]!, id: `x-loss-${i}`,
+    providerGameId: `x-loss-${i}`, homeTeamId: "FCS", awayTeamId: "X" })));
+  const flags = new Map([...ids, "X"].map(id => [id, { q: false, f: false, wq: false, wf: false }]));
+  const future = input.games.filter(g => !g.completed);
+  for (let mask = 0; mask < 1 << future.length; mask++) {
+    const outcomes = future.map((g, i) => ({ ...g, completed: true, status: "completed" as const,
+      homeScore: mask & (1 << i) ? 1 : 0, awayScore: mask & (1 << i) ? 0 : 1 }));
+    const terminal = { season: input.season, teams: input.teams,
+      games: [...input.games.filter(g => g.completed), ...outcomes] };
+    const records = computeEligibility(terminal);
+    const ratings = computeColley(terminal);
+    const recordList = [...records].map(([teamId, entry]) => ({ teamId, record: entry.record }));
+    const eligible = [...records].filter(([, entry]) => entry.eligible).map(([id]) => id).sort();
+    const automatic = computePlayoff({ ...terminal, ratings, records: recordList, pollEntries: [] }, input.snapshot)
+      .seeding.selection;
+    const selected = new Set([...automatic.initialBid, ...automatic.initialPlayin]);
+    const candidates = eligible.filter(id => !selected.has(id));
+    const count = Math.min(12 - selected.size, candidates.length);
+    const subsets: string[][] = [];
+    function visit(start: number, chosen: string[]) {
+      if (chosen.length === count) { subsets.push([...chosen]); return; }
+      for (let j = start; j < candidates.length; j++) visit(j + 1, [...chosen, candidates[j]!]);
+    }
+    visit(0, []);
+    for (const subset of subsets) {
+      const poll = [...subset, ...eligible.filter(id => !subset.includes(id))].slice(0, 25);
+      const bracket = computePlayoff({ ...terminal, ratings, records: recordList,
+        pollEntries: poll.map((teamId, rank) => ({ teamId, rank: rank + 1 })) }, input.snapshot);
+      const qualified = new Set([...bracket.seeding.selection.bid, ...bracket.seeding.selection.playin]);
+      for (const [id, flag] of flags) {
+        const q = qualified.has(id);
+        const winOut = future.every((game, index) => game.homeTeamId !== id && game.awayTeamId !== id ||
+          Boolean(mask & (1 << index)) === (game.homeTeamId === id));
+        flag[q ? "q" : "f"] = true;
+        if (winOut) flag[q ? "wq" : "wf"] = true;
+      }
+    }
+  }
+  const solved = computeScenarios(input);
+  expect(solved.complete).toBe(true);
+  for (const [id, f] of flags) {
+    const expected = !f.f ? "clinched" : !f.q ? "eliminated" : !f.wf ? "controls_destiny" :
+      f.wq ? "needs_help" : null;
+    expect(solved.proofs.find(p => p.teamId === id)?.label).toBe(expected);
+  }
+  expect(solved.proofs.find(p => p.teamId === "X")?.label).toBe("eliminated");
+  // A separate no-game fixture above exercises poll-dependent needs-help.
+  expect(solved.proofs.some(p => p.label === "controls_destiny")).toBe(true);
+  expect(solved.proofs.some(p => p.label === "clinched")).toBe(true);
 });
