@@ -235,6 +235,8 @@ function buildConsistent(db: Database, plan: SnapshotPlan, nowUtc: string, expec
           retrospective: true }), nowUtc);
     for (const game of included) db.query(`INSERT INTO snapshot_games VALUES (?,?,?,?)`)
       .run(plan.key, revision, game.id, game.resultRevision);
+    db.query(`INSERT INTO snapshot_h2h_audit VALUES (?,?,?,?)`).run(plan.key, revision,
+      JSON.stringify(result.seeding.selection.graph), JSON.stringify(result.seeding.selection.unappliedOutsiderBidClaims));
     for (const ranking of result.seeding.rankings) db.query(`INSERT INTO snapshot_rankings
       (snapshot_key,snapshot_revision,team_id,wins,losses,ties,rating,residual,precision_method,
        colley_rank,adjusted_rank,eligible,eligibility_reason,original_route,final_category)

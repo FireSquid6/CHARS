@@ -70,6 +70,9 @@ test("week zero, preseason, AP fallback, and pre-CCG final isolate future result
     const report = rebuildSnapshots(db, 2020, "2020-12-10T00:00:00.000Z");
     expect(report.incomplete.some(item => item.key === "2020:selection-final")).toBe(false);
     expect(report.published).toContain("2020:selection-final");
+    const audit = db.query<{ graph_json: string }, []>(`SELECT graph_json FROM snapshot_h2h_audit
+      WHERE snapshot_key='2020:selection-final' AND snapshot_revision=1`).get();
+    expect(JSON.parse(audit!.graph_json).rawEdges).toEqual([{ winnerTeamId: "A", loserTeamId: "B", supportingGameIds: ["week1"] }]);
     const final = repo.publishedSnapshots(2020).find(s => s.kind === "selection_final")!;
     expect(final.pollReleaseId).toBe("cfp-final");
     expect(db.query<{ game_id: string }, []>("SELECT game_id FROM snapshot_games WHERE snapshot_key='2020:selection-final' ORDER BY game_id").all()
@@ -86,6 +89,8 @@ test("week zero, preseason, AP fallback, and pre-CCG final isolate future result
     expect(changed.published).toContain("2020:selection-final");
     expect(changed.published).not.toContain("2020:week:0");
     expect(publishedSnapshot(db, "2020:selection-final")?.revision).toBe(2);
+    expect(db.query<{ graph_json: string }, []>(`SELECT graph_json FROM snapshot_h2h_audit
+      WHERE snapshot_key='2020:selection-final' AND snapshot_revision=1`).get()?.graph_json).toBe(audit!.graph_json);
   } finally { db.close(); }
 });
 
