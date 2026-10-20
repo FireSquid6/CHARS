@@ -8,7 +8,7 @@
     "build": "bun run --filter app build",
     "start": "bun run --filter app start",
     "lint": "bun run --filter app lint",
-    "typecheck": "bun run --filter app typegen && bun run --filter app typecheck && bun run --filter chars-db typecheck",
+    "typecheck": "bun run --filter app typegen && bun run --filter app typecheck && bun run --filter chars-db typecheck && bun run --filter chars-algorithm typecheck",
     "test": "bun test",
     "db:generate": "bun run --filter chars-db db:generate",
     "db:migrate": "bun packages/chars-db/src/migrate.ts"

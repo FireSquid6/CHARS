@@ -5,6 +5,13 @@
     "": {
       "name": "chars",
     },
+    "packages/chars-algorithm": {
+      "name": "chars-algorithm",
+      "version": "0.0.0",
+      "devDependencies": {
+        "typescript": "5.9.3",
+      },
+    },
     "packages/chars-db": {
       "name": "chars-db",
       "dependencies": {
@@ -442,6 +449,8 @@
     "caniuse-lite": ["caniuse-lite@1.0.30001816", "", {}, "sha512-+8Yx7BXCoqk6IF8yTicjfUR6D/ldJzdlsodlEOiOSPmhK844WIgk67/zIQaGAOxNkZyyvBlrRFnLvqKIoqbAFw=="],
 
     "chalk": ["chalk@4.1.2", "", { "dependencies": { "ansi-styles": "^4.1.0", "supports-color": "^7.1.0" } }, "sha512-oKnbhFyRIXpUuez8iBMmyEa4nbj4IOQyuhc/wy9kY7/WVPcwIO9VA668Pu8RkO7+0G76SLROeyw9CpQ061i4mA=="],
+
+    "chars-algorithm": ["chars-algorithm@workspace:packages/chars-algorithm"],
 
     "chars-db": ["chars-db@workspace:packages/chars-db"],
 
