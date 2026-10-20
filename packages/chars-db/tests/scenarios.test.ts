@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createHash, createHmac } from "node:crypto";
 import { join } from "node:path";
 import { openDatabase } from "../src/index";
 import { migrate } from "../src/migrate";
@@ -138,9 +139,11 @@ test("memory interruption and smaller budgets never carry partial-leaf witnesses
   try {
     const stopped = solveSnapshot(db, "week", { maxCompletions: 2, maxRuntimeMs: 10000,
        maxTrackedPollPaths: 1 });
-    expect(stopped.state).toBe("pending");
+    expect(stopped.state).toBe("unsupported");
     expect(stopped.evaluated).toBe(0);
     expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM scenario_statuses WHERE state='proved'").get()?.n).toBe(0);
+    expect(solveSnapshot(db, "week", { maxCompletions: 1, maxRuntimeMs: 10000,
+      maxTrackedPollPaths: 1 }).evaluated).toBe(0);
     const retry = solveSnapshot(db, "week", { maxCompletions: 1, maxRuntimeMs: 10000,
        maxTrackedPollPaths: 13 });
     expect(retry.state).toBe("pending");
@@ -229,4 +232,47 @@ test("poll dependence survives a stored subset cursor across two connections", a
     expect(peer.query<{ evaluated_completions: number }, []>(
       "SELECT evaluated_completions FROM scenario_jobs").get()?.evaluated_completions).toBe(9);
   } finally { peer.close(); db.close(); }
+});
+
+test("recomputed public digest cannot turn one of nine poll subsets into a proved elimination", async () => {
+  const { db, path } = await fixture();
+  const peer = openDatabase({ path });
+  try {
+    db.query("UPDATE games SET status='cancelled' WHERE id='future'").run();
+    const budget = { maxCompletions: 1, maxRuntimeMs: 10000, maxTrackedPollPaths: 100 };
+    const first = solveSnapshot(db, "week", budget);
+    const saved = peer.query<{ checkpoint_json: string }, [string]>(
+      "SELECT checkpoint_json FROM scenario_jobs WHERE id=?").get(first.jobId)!.checkpoint_json;
+    const forged = JSON.parse(saved);
+    forged.payload.gameIndex = "1";
+    forged.payload.pollIndex = "0";
+    forged.digest = createHash("sha256").update(JSON.stringify(forged.payload)).digest("hex");
+    peer.query("UPDATE scenario_jobs SET checkpoint_json=? WHERE id=?").run(JSON.stringify(forged), first.jobId);
+    expect(() => solveSnapshot(db, "week", budget)).toThrow(/Unverified scenario checkpoint/);
+    forged.digest = createHmac("sha256", "attacker-controlled-key")
+      .update(JSON.stringify(forged.payload)).digest("hex");
+    peer.query("UPDATE scenario_jobs SET checkpoint_json=? WHERE id=?").run(JSON.stringify(forged), first.jobId);
+    expect(() => solveSnapshot(db, "week", budget)).toThrow(/Unverified scenario checkpoint/);
+    expect(peer.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM scenario_statuses WHERE label='eliminated'")
+      .get()?.n).toBe(0);
+    peer.query("UPDATE scenario_jobs SET checkpoint_json=? WHERE id=?").run(saved, first.jobId);
+    for (let i = 0; i < 9; i++) solveSnapshot(db, "week", budget);
+    const row = db.query<{ label: string }, []>("SELECT label FROM scenario_statuses WHERE team_id='C10'").get();
+    expect(row?.label).toBe("needs_help");
+  } finally { peer.close(); db.close(); }
+});
+
+test("checkpoint size cap publishes unsupported once, manual larger cap resumes", async () => {
+  const { db } = await fixture();
+  try {
+    db.query("UPDATE games SET status='cancelled' WHERE id='future'").run();
+    const budget = { maxCompletions: 1, maxRuntimeMs: 10000, maxTrackedPollPaths: 100,
+      maxCheckpointBytes: 1024 };
+    const blocked = solveSnapshot(db, "week", budget);
+    expect(blocked).toMatchObject({ state: "unsupported", evaluated: 0 });
+    expect(solveSnapshot(db, "week", budget)).toMatchObject({ state: "unsupported", evaluated: 0 });
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM scenario_statuses WHERE label IS NOT NULL")
+      .get()?.n).toBe(0);
+    expect(solveSnapshot(db, "week", { ...budget, maxCheckpointBytes: 1024 * 1024 }).state).toBe("pending");
+  } finally { db.close(); }
 });

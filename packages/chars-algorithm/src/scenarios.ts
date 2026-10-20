@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { computeColley } from "./colley";
 import { computeEligibility, includedRegularGames, type SeasonGames } from "./eligibility";
 import { computePlayoff } from "./brackets";
@@ -24,7 +24,7 @@ export interface ScenarioInput extends SeasonGames {
   maxTrackedPollPaths?: number;
   /** Serialized frontier upper bound in bytes. Defaults to 16 MiB. */
   maxCheckpointBytes?: number;
-  /** Opaque, digest-bound frontier returned by a previous invocation. */
+  /** Opaque authenticated frontier. Resumption requires the separately supplied verifier key. */
   checkpoint?: ScenarioCheckpoint;
 }
 
@@ -48,6 +48,8 @@ export interface ScenarioResult {
   evaluatedCompletions: number;
   possibleCompletions: number | null;
   pendingReason: string | null;
+  /** A fixed memory cap blocked the current leaf; raise the cap before retrying. */
+  unsupportedReason: string | null;
   nextCompletion: number;
   complete: boolean;
   checkpoint: ScenarioCheckpoint | null;
@@ -58,6 +60,8 @@ type WitnessKind = ScenarioWitness["kind"];
 const KINDS: WitnessKind[] = ["qualifying", "failing", "qualifying_win_out", "failing_win_out"];
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const sign = (value: unknown, key: string) => createHmac("sha256", key).update(JSON.stringify(value)).digest("hex");
+const hexBytes = (hex: string) => Uint8Array.from(hex.match(/../g)!, part => parseInt(part, 16));
 function choose(n: number, k: number): bigint {
   let result = 1n;
   for (let i = 1; i <= k; i++) result = result * BigInt(n - k + i) / BigInt(i);
@@ -76,7 +80,8 @@ function subsetAt(candidates: string[], count: number, rank: bigint): string[] {
 }
 
 /** Pure, exhaustive small-schedule certificate; never turns a partial search into a label. */
-export function computeScenarios(input: ScenarioInput): ScenarioResult {
+/** The verifier key is a privileged DB-held capability, never part of public input or checkpoint JSON. */
+export function computeScenarios(input: ScenarioInput, verifierKey?: string): ScenarioResult {
   const started = Date.now();
   const { season, teams, games, snapshot } = input;
   if (snapshot.season !== season) throw new Error("Scenario snapshot season mismatch");
@@ -92,6 +97,8 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
     throw new Error("Invalid scenario budget");
   if ("startCompletion" in input || "initialWitnesses" in input)
     throw new Error("Unverified scenario cursor/witnesses are unsupported; supply a verified checkpoint");
+  if (verifierKey !== undefined && !/^[a-f0-9]{64}$/.test(verifierKey))
+    throw new Error("Invalid scenario verifier key");
   // Validate even excluded games. Missing opponent membership is an unresolved
   // coverage gap, not evidence that the game can be discarded.
   let validationGap: string | null = null;
@@ -100,7 +107,8 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
     if (!(error instanceof Error) || !error.message.startsWith("Unknown or wrong-season opponent in ")) throw error;
     validationGap = error.message;
   }
-  const fbs = teams.filter(team => team.membership === "fbs").map(team => team.teamId).sort();
+  const codepoint = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
+  const fbs = teams.filter(team => team.membership === "fbs").map(team => team.teamId).sort(codepoint);
   const membership = new Map(teams.map(team => [team.teamId, team.membership]));
   const parseUtc = (value: string) => /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(value) &&
     !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() ===
@@ -142,7 +150,7 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
     }
     includedGames.push(game);
   }
-  includedGames.sort((a, b) => a.id.localeCompare(b.id));
+  includedGames.sort((a, b) => codepoint(a.id, b.id));
   const remaining = includedGames.filter(game => !game.completed);
   const assumptions = ["fixed remaining included regular-season schedule; no future cancellation or additions",
     "completed included results frozen; future CCGs, bowls and playoff games excluded",
@@ -152,10 +160,10 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
     `poll model ${POLL_MODEL_VERSION}; solver ${SOLVER_VERSION}`];
   const scheduleFingerprint = hash([snapshot, season, input.gameCutoffUtc, input.selectionFreezeUtc,
     input.scheduleComplete, input.allowHistoricalTies === true, POLL_MODEL_VERSION, SOLVER_VERSION,
-    teams.map(t => [t.season, t.teamId, t.membership]).sort((a, b) => String(a[1]).localeCompare(String(b[1]))),
+    teams.map(t => [t.season, t.teamId, t.membership]).sort((a, b) => codepoint(String(a[1]), String(b[1]))),
     games.map(g => [g.id, g.providerGameId, g.season, g.homeTeamId, g.awayTeamId,
       g.applicationGameType, g.status, g.completed, g.kickoffUtc, g.homeScore, g.awayScore,
-      g.resultRevision]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))]);
+       g.resultRevision]).sort((a, b) => codepoint(String(a[0]), String(b[0])))]);
   const base = { snapshotKey: snapshot.key, snapshotRevision: snapshot.revision,
     pollModelVersion: POLL_MODEL_VERSION, solverVersion: SOLVER_VERSION };
   const initial = { inputDigest: scheduleFingerprint, gameIndex: "0", pollIndex: "0", evaluated: 0,
@@ -163,7 +171,9 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
     pollPairs: Object.fromEntries(fbs.map(id => [id, {}])) as ScenarioCheckpoint["payload"]["pollPairs"] };
   if (input.checkpoint) {
     const { payload, digest } = input.checkpoint;
-    if (!payload || digest !== hash(payload) || payload.inputDigest !== scheduleFingerprint ||
+    if (!verifierKey || !payload || typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest) ||
+      !timingSafeEqual(hexBytes(digest), hexBytes(sign(payload, verifierKey))) ||
+      payload.inputDigest !== scheduleFingerprint ||
       !/^(0|[1-9]\d*)$/.test(payload.gameIndex) || !/^(0|[1-9]\d*)$/.test(payload.pollIndex) ||
       !Number.isSafeInteger(payload.evaluated) || payload.evaluated < 0 ||
       !payload.witnesses || !payload.pollPairs ||
@@ -175,17 +185,21 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
   const progress: ScenarioCheckpoint["payload"] = input.checkpoint ?
     JSON.parse(JSON.stringify(input.checkpoint.payload)) as ScenarioCheckpoint["payload"] : initial;
   let frontierBytes = new TextEncoder().encode(JSON.stringify(progress)).length;
+  let trackedPaths = Object.values(progress.pollPairs).reduce((n, paths) => n + Object.keys(paths).length, 0);
   const variableOutcomes: Outcome[] = input.allowHistoricalTies ? ["home", "away", "tie"] : ["home", "away"];
   const totalGames = BigInt(variableOutcomes.length) ** BigInt(remaining.length);
   const maximumSpace = totalGames * choose(Math.max(0, fbs.length - 4), Math.min(8, Math.max(0, fbs.length - 4)));
   const largestSpace = maximumSpace <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(maximumSpace) : null;
   let evaluatedCompletions = 0;
   let pendingReason: string | null = null;
+  let unsupportedReason: string | null = null;
   const recordEliminated = new Set<string>();
+  const boundWitnessNotes = new Map<string, string>();
   const recordsById = new Map<string, { wins: number; losses: number; ties: number; future: number;
     possible: boolean; guaranteed: boolean }>();
   let allEligibleBound = false;
-  const checkpoint = (): ScenarioCheckpoint => ({ payload: progress, digest: hash(progress) });
+  const checkpoint = (): ScenarioCheckpoint | null => verifierKey ?
+    { payload: progress, digest: sign(progress, verifierKey) } : null;
   const makeProof = (teamId: string, reason: string): ScenarioProof => {
     const bound = recordsById.get(teamId);
     const eliminated = recordEliminated.has(teamId) && !dataGap;
@@ -201,14 +215,15 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
       maximumPercentageNumerator: 4 * (r.wins + future) + 2 * r.ties,
       thresholdNumerator: 3 * total, future
     } : null;
-    return { ...base, teamId, state: eliminated || boundLabel ? "proved" : "pending",
+    return { ...base, teamId, state: eliminated || boundLabel ? "proved" : unsupportedReason ? "unsupported" : "pending",
       label: eliminated ? "eliminated" : boundLabel, assumptions,
       proofMetadata: eliminated || boundLabel ? JSON.stringify({ certificate: eliminated ?
         "exact maximum terminal record below .750" : "selection-aware eligible universe at most twelve",
         scheduleFingerprint, snapshotInputHash: snapshot.inputHash,
         fixedScheduleGameIds: remaining.map(game => game.id),
+        qualifyingWitness: boundLabel ? boundWitnessNotes.get(teamId) ?? "not materialized" : null,
         record: { wins: r!.wins, losses: r!.losses, ties: r!.ties, ...eligibilityBounds } }) :
-        JSON.stringify({ pendingReason: reason, eligibilityBounds,
+         JSON.stringify({ pendingReason: reason, unsupportedReason, eligibilityBounds,
           certificate: "eligibility bounds only; no selection claim", scheduleFingerprint,
           snapshotInputHash: snapshot.inputHash }),
       runtimeMs: Date.now() - started,
@@ -218,7 +233,7 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
   const pending = (reason: string): ScenarioResult => ({
     proofs: fbs.map(teamId => makeProof(teamId, reason)),
     assumptions, evaluatedCompletions, possibleCompletions: largestSpace,
-    pendingReason: reason, nextCompletion: progress.evaluated, complete: false,
+    pendingReason: reason, unsupportedReason, nextCompletion: progress.evaluated, complete: false,
     checkpoint: dataGap ? null : checkpoint()
   });
   if (dataGap) return pending(dataGap);
@@ -235,19 +250,53 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
   }
   const maximumEligible = fbs.filter(id => recordsById.get(id)!.possible).length;
   allEligibleBound = maximumEligible <= 12;
-  if (allEligibleBound) return {
+  if (allEligibleBound) {
+    for (const teamId of fbs.filter(id => recordsById.get(id)!.possible)) {
+      if (Date.now() - started >= maxRuntimeMs) {
+        boundWitnessNotes.set(teamId, "not materialized: runtime budget exhausted; record/selection certificate remains valid");
+        continue;
+      }
+      const outcomes: Record<string, Outcome> = {};
+      const terminalGames = includedGames.map(game => {
+        if (game.completed) return game;
+        const result: Outcome = game.homeTeamId === teamId ? "home" : game.awayTeamId === teamId ? "away" : "home";
+        outcomes[game.id] = result;
+        return { ...game, completed: true, status: "completed" as const,
+          homeScore: result === "home" ? 1 : 0, awayScore: result === "away" ? 1 : 0 };
+      });
+      const terminal: SeasonGames = { season, teams, games: terminalGames };
+      const records = [...computeEligibility(terminal)].map(([id, entry]) => ({ teamId: id, record: entry.record }));
+      const ratings = computeColley(terminal);
+      const eligible = [...computeEligibility(terminal)].filter(([, entry]) => entry.eligible)
+        .map(([id]) => id).sort(codepoint);
+      const poll = [teamId, ...eligible.filter(id => id !== teamId)].slice(0, 25);
+      const playoff = computePlayoff({ ...terminal, ratings, records,
+        pollEntries: poll.map((id, rank) => ({ teamId: id, rank: rank + 1 })) }, snapshot);
+      if (![...playoff.seeding.selection.bid, ...playoff.seeding.selection.playin].includes(teamId))
+        throw new Error(`Selection-aware bound witness failed verification for ${teamId}`);
+      const witness: ScenarioWitness = { kind: "qualifying", gameOutcomes: outcomes,
+        pollOrderTeamIds: poll, assumptions: ["one possible path, not a sufficient or necessary condition",
+          `eligible poll order: ${poll.join(" > ") || "empty"}`] };
+      progress.witnesses[teamId]!.qualifying = witness;
+      progress.witnesses[teamId]!.qualifying_win_out = { ...witness, kind: "qualifying_win_out" };
+      boundWitnessNotes.set(teamId, "constructed and verified by terminal selection engine");
+    }
+    return {
     proofs: fbs.map(id => makeProof(id, "")), assumptions, evaluatedCompletions: 0,
     possibleCompletions: largestSpace, pendingReason: null, nextCompletion: progress.evaluated,
-    complete: true, checkpoint: null
-  };
+    unsupportedReason: null, complete: true, checkpoint: null
+    };
+  }
   if (BigInt(progress.gameIndex) > totalGames ||
     (BigInt(progress.gameIndex) === totalGames && progress.pollIndex !== "0") ||
     progress.evaluated > Number.MAX_SAFE_INTEGER - maxCompletions)
     throw new Error("Unverified scenario checkpoint cursor");
+  if (frontierBytes > maxCheckpointBytes) unsupportedReason =
+    `Checkpoint memory budget ${maxCheckpointBytes} bytes smaller than stored frontier ${frontierBytes} bytes`;
   // Every indexed leaf has a unique game outcome and poll subset. No sampled
   // prefix is ever promoted to a quantified result.
   while (BigInt(progress.gameIndex) < totalGames && evaluatedCompletions < maxCompletions &&
-    Date.now() - started < maxRuntimeMs && !pendingReason) {
+    Date.now() - started < maxRuntimeMs && !unsupportedReason) {
     let value = BigInt(progress.gameIndex);
     const outcomes: Record<string, Outcome> = {};
     const terminalGames: Game[] = [...includedGames];
@@ -261,7 +310,7 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
     }
     const terminal: SeasonGames = { season, teams, games: terminalGames };
     const computed = computeEligibility(terminal);
-    const eligible = [...computed].filter(([, entry]) => entry.eligible).map(([id]) => id).sort();
+    const eligible = [...computed].filter(([, entry]) => entry.eligible).map(([id]) => id).sort(codepoint);
     const ratings = computeColley(terminal);
     const recordList: SelectionInput["records"] = [...computed].map(([teamId, entry]) => ({ teamId, record: entry.record }));
     const automatic = computePlayoff({ ...terminal, ratings, records: recordList, pollEntries: [] }, snapshot)
@@ -272,7 +321,7 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
     const pollCount = choose(candidates.length, count);
     if (BigInt(progress.pollIndex) >= pollCount) throw new Error("Unverified scenario checkpoint poll cursor");
     while (BigInt(progress.pollIndex) < pollCount && evaluatedCompletions < maxCompletions &&
-      Date.now() - started < maxRuntimeMs && !pendingReason) {
+      Date.now() - started < maxRuntimeMs && !unsupportedReason) {
       const chosen = subsetAt(candidates, count, BigInt(progress.pollIndex));
       const chosenSet = new Set(chosen);
       const pollOrder = [...chosen, ...eligible.filter(id => !chosenSet.has(id))].slice(0, 25);
@@ -280,10 +329,9 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
       const winOutIds = fbs.filter(teamId => remaining.every(game =>
         game.homeTeamId !== teamId && game.awayTeamId !== teamId ||
         outcomes[game.id] === (game.homeTeamId === teamId ? "home" : "away")));
-      const pathCount = Object.values(progress.pollPairs).reduce((n, paths) => n + Object.keys(paths).length, 0);
       const newPaths = winOutIds.filter(id => !progress.pollPairs[id]![progress.gameIndex]).length;
-      if (pathCount + newPaths > maxTrackedPollPaths) {
-        pendingReason = `Poll-path memory budget ${maxTrackedPollPaths} exhausted`;
+      if (trackedPaths + newPaths > maxTrackedPollPaths) {
+        unsupportedReason = `Poll-path memory budget ${maxTrackedPollPaths} exhausted; increase the cap to resume`;
         break;
       }
       const bracket = computePlayoff({ ...terminal, ratings, records: recordList,
@@ -303,8 +351,8 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
       }, 0);
       const newPairValues = winOutIds.filter(id => !progress.pollPairs[id]![progress.gameIndex]?.[
         qualified.has(id) ? "qualifying" : "failing"]).length;
-      if (frontierBytes + (newWitnesses + newPairValues) * witnessSize > maxCheckpointBytes) {
-        pendingReason = `Checkpoint memory budget ${maxCheckpointBytes} bytes exhausted`;
+      if (frontierBytes + (newWitnesses + newPairValues) * witnessSize + 128 > maxCheckpointBytes) {
+        unsupportedReason = `Checkpoint memory budget ${maxCheckpointBytes} bytes exhausted; increase the cap to resume`;
         break;
       }
       for (const teamId of fbs) {
@@ -319,7 +367,10 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
         if (winOut) progress.pollPairs[teamId]![progress.gameIndex]![qualifies ? "qualifying" : "failing"] ??= witness;
       }
       progress.pollIndex = (BigInt(progress.pollIndex) + 1n).toString();
-      frontierBytes = new TextEncoder().encode(JSON.stringify(progress)).length;
+      trackedPaths += newPaths;
+      // Conservatively charge each inserted witness/pair, including JSON keys
+      // and cursor growth; avoid serializing the entire frontier per leaf.
+      frontierBytes += (newWitnesses + newPairValues) * witnessSize + 128;
       progress.evaluated++;
       evaluatedCompletions++;
     }
@@ -328,7 +379,7 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
       progress.pollIndex = "0";
     }
   }
-  if (BigInt(progress.gameIndex) < totalGames) return pending(pendingReason ??
+  if (BigInt(progress.gameIndex) < totalGames) return pending(unsupportedReason ?? pendingReason ??
     (evaluatedCompletions >= maxCompletions ? `Scenario completion budget ${maxCompletions} exhausted` :
       "Scenario runtime budget exhausted"));
   const proofs: ScenarioProof[] = fbs.map(teamId => {
@@ -354,5 +405,5 @@ export function computeScenarios(input: ScenarioInput): ScenarioResult {
       witnesses: KINDS.flatMap(kind => found[kind] ? [found[kind]!] : []) };
   });
   return { proofs, assumptions, evaluatedCompletions, possibleCompletions: progress.evaluated,
-    pendingReason: null, nextCompletion: progress.evaluated, complete: true, checkpoint: null };
+    pendingReason: null, unsupportedReason: null, nextCompletion: progress.evaluated, complete: true, checkpoint: null };
 }

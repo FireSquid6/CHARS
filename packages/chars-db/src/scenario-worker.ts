@@ -45,7 +45,8 @@ export function workScenarios(db: Database, limit = 1, solve: typeof solveSnapsh
       db.query(`UPDATE scenario_work_queue SET expires_at_utc=? WHERE snapshot_key=? AND snapshot_revision=?
         AND owner=? AND expires_at_utc>?`).run(expires, key, job.snapshot_revision, job.owner, new Date().toISOString());
       const result = solve(db, key, { maxCompletions: Number(process.env.SCENARIO_MAX_COMPLETIONS ?? 1000),
-        maxRuntimeMs: runtime, maxTrackedPollPaths: Number(process.env.SCENARIO_MAX_TRACKED_POLL_PATHS ?? 10000) },
+        maxRuntimeMs: runtime, maxTrackedPollPaths: Number(process.env.SCENARIO_MAX_TRACKED_POLL_PATHS ?? 10000),
+        maxCheckpointBytes: Number(process.env.SCENARIO_MAX_CHECKPOINT_BYTES ?? 16 * 1024 * 1024) },
         undefined, { owner: job.owner, revision: job.snapshot_revision });
       const state = result.state === "pending" ? "pending" : "done";
       transaction(db, () => {

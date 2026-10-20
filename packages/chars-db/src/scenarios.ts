@@ -1,5 +1,5 @@
 /** A bounded, resumable, single-writer scenario worker. Never called by request rendering. */
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import { computeScenarios, POLL_MODEL_VERSION, SOLVER_VERSION,
   type Game, type ScenarioCheckpoint, type ScenarioInput, type SnapshotIdentity, type TeamSeason } from "chars-algorithm";
@@ -10,10 +10,10 @@ type SnapshotRow = { snapshot_key: string; revision: number; season: number; kin
   game_cutoff_utc: string; input_hash: string; policy_version: string; model_version: string;
   calendar_policy_version: string; coverage_json: string; state: string };
 type Job = { id: string; state: string; input_hash: string; input_generation: number;
-  checkpoint_json: string | null; evaluated_completions: number;
+  checkpoint_json: string | null; evaluated_completions: number; budget_json: string;
   lease_owner: string | null; lease_expires_utc: string | null };
 type Budget = { maxCompletions: number; maxRuntimeMs: number; maxTrackedPollPaths: number;
-  allowHistoricalTies?: boolean };
+  maxCheckpointBytes?: number; allowHistoricalTies?: boolean };
 export type QueueFence = { owner: string; revision: number };
 const one = <T>(db: Database, sql: string, ...bindings: (number | string)[]) => db.query(sql).get(...bindings) as T | null;
 const all = <T>(db: Database, sql: string, ...bindings: (number | string)[]) => db.query(sql).all(...bindings) as T[];
@@ -110,8 +110,20 @@ export function solveSnapshot(db: Database, key: string, budget: Budget = {
         POLL_MODEL_VERSION, SOLVER_VERSION, inputHash, null, now, now,
         generation, JSON.stringify(budget));
       row = one<Job>(db, "SELECT * FROM scenario_jobs WHERE id=?", jobId)!;
+      db.query("INSERT INTO scenario_job_secrets (job_id,secret_hex) VALUES (?,?)")
+        .run(jobId, randomBytes(32).toString("hex"));
     }
-    if (row.state === "proved" || row.state === "unsupported") return row;
+    const secret = one<{ secret_hex: string }>(db,
+      "SELECT secret_hex FROM scenario_job_secrets WHERE job_id=?", jobId)?.secret_hex;
+    if (!secret) throw new Error("Missing scenario verifier key; cannot resume or publish");
+    if (row.state === "proved" || row.state === "unsupported" && !row.checkpoint_json)
+      return { ...row, secret, leased: false };
+    if (row.state === "unsupported") {
+      const previous = JSON.parse(row.budget_json) as Budget;
+      if ((budget.maxTrackedPollPaths ?? 0) <= (previous.maxTrackedPollPaths ?? 0) &&
+        (budget.maxCheckpointBytes ?? 16 * 1024 * 1024) <= (previous.maxCheckpointBytes ?? 16 * 1024 * 1024))
+        return { ...row, secret, leased: false };
+    }
     if (row.checkpoint_json !== null &&
       (JSON.parse(row.checkpoint_json) as ScenarioCheckpoint).payload?.evaluated !== row.evaluated_completions)
       throw new Error("Unverified scenario checkpoint; cannot resume or publish");
@@ -123,12 +135,13 @@ export function solveSnapshot(db: Database, key: string, budget: Budget = {
       updated_at_utc=?,budget_json=? WHERE id=?`).run(owner,
       new Date(Date.now() + Math.max(60000, budget.maxRuntimeMs + 30000)).toISOString(), now,
       JSON.stringify(budget), jobId);
-    return row;
+    return { ...row, secret, leased: true };
   });
-  if (job.state === "proved" || job.state === "unsupported") return { jobId, state: job.state, evaluated: 0 };
+  if (!job.leased)
+    return { jobId, state: job.state, evaluated: 0 };
   try {
     const result = computeScenarios({ ...input, ...budget,
-      checkpoint: job.checkpoint_json ? JSON.parse(job.checkpoint_json) as ScenarioCheckpoint : undefined });
+      checkpoint: job.checkpoint_json ? JSON.parse(job.checkpoint_json) as ScenarioCheckpoint : undefined }, job.secret);
     beforePublish?.();
     transaction(db, () => {
       guard();
@@ -150,14 +163,15 @@ export function solveSnapshot(db: Database, key: string, budget: Budget = {
           (job_id,team_id,kind,sequence,witness_json) VALUES (?,?,?,1,?)
           ON CONFLICT(job_id,team_id,kind,sequence) DO NOTHING`).run(jobId, proof.teamId, witness.kind, JSON.stringify(witness));
       }
-      const state = result.complete ? result.proofs.some(p => p.state === "unsupported") ? "unsupported" : "proved" : "pending";
+      const state = result.unsupportedReason || result.complete && result.proofs.some(p => p.state === "unsupported") ?
+        "unsupported" : result.complete ? "proved" : "pending";
       db.query(`UPDATE scenario_jobs SET state=?, checkpoint_json=?,evaluated_completions=?,
         lease_owner=NULL,lease_expires_utc=NULL,updated_at_utc=? WHERE id=?`).run(state,
          result.checkpoint ? JSON.stringify(result.checkpoint) : null,
          result.nextCompletion, new Date().toISOString(), jobId);
     });
-    return { jobId, state: result.complete ? result.proofs.some(p => p.state === "unsupported") ?
-      "unsupported" : "proved" : "pending", evaluated: result.evaluatedCompletions,
+    return { jobId, state: result.unsupportedReason || result.complete && result.proofs.some(p => p.state === "unsupported") ?
+      "unsupported" : result.complete ? "proved" : "pending", evaluated: result.evaluatedCompletions,
       pendingReason: result.pendingReason };
   } finally {
     transaction(db, () => {
@@ -184,6 +198,7 @@ if (import.meta.main) {
       maxCompletions: number("SCENARIO_MAX_COMPLETIONS", 1000),
       maxRuntimeMs: number("SCENARIO_MAX_RUNTIME_MS", 5000),
       maxTrackedPollPaths: number("SCENARIO_MAX_TRACKED_POLL_PATHS", 10000),
+      maxCheckpointBytes: number("SCENARIO_MAX_CHECKPOINT_BYTES", 16 * 1024 * 1024),
       allowHistoricalTies: args[2] === "--allow-historical-ties"
     }), null, 2));
   } finally { db.close(); }
