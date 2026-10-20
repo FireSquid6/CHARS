@@ -3,7 +3,7 @@ import { configFromEnv, openDatabase } from "./index";
 import { currentFootballSeason, fetchSeason, ingestSeason } from "./ingest";
 import { migrate } from "./migrate";
 
-export function parseBackfillArgs(args: string[], now = new Date()): number[] {
+export function parseBackfillArgs(args: string[], now = new Date(), timezone = process.env.SYNC_TIMEZONE ?? "America/Chicago"): number[] {
   const options = new Map<string, string>();
   for (let i = 0; i < args.length; i += 2) {
     if (!["--season", "--from", "--to"].includes(args[i] ?? "") || !args[i + 1] || options.has(args[i]!)) {
@@ -15,7 +15,7 @@ export function parseBackfillArgs(args: string[], now = new Date()): number[] {
     (!options.has("--season") && (options.size !== 2 || !options.has("--from") || !options.has("--to")))) {
     throw new Error("Usage: bun run data:backfill --season YEAR | --from YEAR --to CURRENT|YEAR");
   }
-  const current = currentFootballSeason(now);
+  const current = currentFootballSeason(now, timezone);
   function year(value: string | undefined): number {
     const result = value === "CURRENT" ? current : /^\d{4}$/.test(value ?? "") ? Number(value) : NaN;
     if (!Number.isSafeInteger(result) || result < 1998 || result > current) throw new Error(`Invalid season ${value}; expected 1998 through CURRENT (${current})`);

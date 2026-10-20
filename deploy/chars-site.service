@@ -10,8 +10,7 @@ Group=chars
 WorkingDirectory=/opt/chars
 EnvironmentFile=/etc/chars/chars.env
 Environment=NODE_ENV=production
-Environment=HOSTNAME=127.0.0.1
-ExecStart=/usr/local/bin/bun run start
+ExecStart=/usr/local/bin/bun run start --hostname 127.0.0.1
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=true

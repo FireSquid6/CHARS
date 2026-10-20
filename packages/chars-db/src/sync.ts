@@ -23,11 +23,16 @@ export function scheduledKey(now: Date, timezone = "America/Chicago"): string {
 }
 
 type Plan = { current: number; recent: number; timezone: string };
-function planFor(key: string, now: Date, timezone: string): Plan {
+export function planFor(key: string, now: Date, timezone: string): Plan {
   // A scheduled retry belongs to its original local date, not the day of the retry.
   const scheduled = key.startsWith("daily:");
   const date = scheduled ? new Date(`${key.slice(6)}T12:00:00Z`) : now;
-  const current = currentFootballSeason(date);
+  if (Number.isNaN(date.getTime()) || (scheduled && date.toISOString().slice(0, 10) !== key.slice(6)))
+    throw new Error("Invalid scheduled sync date");
+  // The key already represents a LOCAL calendar date; converting UTC noon back
+  // into a timezone can shift that date (e.g. UTC+14). Only manual runs use now.
+  const current = scheduled ? Number(key.slice(6, 10)) - (Number(key.slice(11, 13)) < 7 ? 1 : 0) :
+    currentFootballSeason(date, timezone);
   const recent = !scheduled || date.getUTCDay() === 0 ? 2 : 0;
   return { current, recent, timezone };
 }
@@ -48,8 +53,8 @@ export function claimSync(db: Database, key: string, now = new Date(), plan?: Pl
       WHERE state='running'`).run(stamp);
     const planned = existing?.planned_current_season !== null && existing?.planned_current_season !== undefined &&
       existing.planned_recent_seasons !== null ? { current: existing.planned_current_season,
-        recent: existing.planned_recent_seasons, timezone: existing.planned_timezone ?? "America/Chicago" } :
-      plan ?? planFor(key, now, "America/Chicago");
+        recent: existing.planned_recent_seasons, timezone: existing.planned_timezone ?? plan?.timezone ?? process.env.SYNC_TIMEZONE ?? "America/Chicago" } :
+      plan ?? planFor(key, now, process.env.SYNC_TIMEZONE ?? "America/Chicago");
     db.query(`INSERT INTO sync_runs (id,scheduled_key,state,started_at_utc,planned_current_season,planned_recent_seasons,planned_timezone)
       VALUES (?,?,'running',?,?,?,?)
       ON CONFLICT(scheduled_key) DO UPDATE SET id=excluded.id,state='running',started_at_utc=excluded.started_at_utc,
@@ -131,7 +136,7 @@ export function syncHealth(db: Database) {
 
 export async function syncData(db: Database, options: SyncOptions) {
   const now = options.now ?? new Date();
-  const timezone = options.timezone ?? "America/Chicago";
+  const timezone = options.timezone ?? process.env.SYNC_TIMEZONE ?? "America/Chicago";
   const defaultPlan = planFor(options.key, now, timezone);
   const owner = claimSync(db, options.key, now, { current: options.currentSeason ?? defaultPlan.current,
     recent: options.recentSeasons ?? defaultPlan.recent, timezone });

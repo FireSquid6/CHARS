@@ -49,9 +49,9 @@ export function classifyGame(game: Game, calendar: readonly CalendarWeek[], conf
   return { type: "unknown", evidence: { ...evidence, reason: "insufficient_or_ambiguous_game_classification" } };
 }
 
-export function currentFootballSeason(now = new Date()): number {
+export function currentFootballSeason(now = new Date(), timezone = "America/Chicago"): number {
   if (Number.isNaN(now.getTime())) throw new Error("Invalid current date");
-  const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", year: "numeric", month: "numeric" }).formatToParts(now);
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: timezone, year: "numeric", month: "numeric" }).formatToParts(now);
   const year = Number(parts.find(p => p.type === "year")?.value), month = Number(parts.find(p => p.type === "month")?.value);
   // January through June belong to the preceding fall; July starts the next season's preseason.
   return month < 7 ? year - 1 : year;

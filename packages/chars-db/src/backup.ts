@@ -2,8 +2,8 @@
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, copyFile, link, unlink } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { access, copyFile, link, open, unlink } from "node:fs/promises";
+import { dirname, isAbsolute } from "node:path";
 import { configFromEnv } from "./index";
 
 async function exists(path: string) {
@@ -20,6 +20,17 @@ export function verifyDatabase(path: string) {
   } finally { db.close(); }
 }
 
+async function fsync(path: string) {
+  const handle = await open(path, "r");
+  try { await handle.sync(); } finally { await handle.close(); }
+}
+
+async function publish(temp: string, destination: string) {
+  await fsync(temp); // Persist SQLite pages before making the name visible.
+  await link(temp, destination); // Atomic; cannot overwrite an existing backup/database.
+  await fsync(dirname(destination));
+}
+
 export async function backup(source: string, destination: string) {
   if (!isAbsolute(source) || !isAbsolute(destination) || source === destination) throw new Error("Use distinct absolute database paths");
   if (!await exists(source)) throw new Error("Source database does not exist");
@@ -30,8 +41,11 @@ export async function backup(source: string, destination: string) {
     db.query("VACUUM INTO ?").run(temp);
     verifyDatabase(temp);
     // Link is atomic and refuses to replace a concurrent destination.
-    await link(temp, destination);
-  } finally { db.close(); if (await exists(temp)) await unlink(temp); }
+    await publish(temp, destination);
+  } finally {
+    db.close();
+    if (await exists(temp)) { await unlink(temp); await fsync(dirname(destination)); }
+  }
   return destination;
 }
 
@@ -46,8 +60,8 @@ export async function restore(source: string, destination: string) {
   try {
     await copyFile(source, temp, constants.COPYFILE_EXCL);
     verifyDatabase(temp);
-    await link(temp, destination);
-  } finally { if (await exists(temp)) await unlink(temp); }
+    await publish(temp, destination);
+  } finally { if (await exists(temp)) { await unlink(temp); await fsync(dirname(destination)); } }
   return destination;
 }
 
