@@ -2,11 +2,11 @@
 
 ## Objective and scope
 
-Build a Next.js website in TypeScript, using Bun and an existing, externally managed SQLite database, around a deterministic, auditable selection and seeding engine for a hypothetical FBS playoff. Calculate Colley ratings internally from stored game results. Apply AP/CFP top-ups, a regular-season winning-percentage floor, and clean head-to-head overrides across selection boundaries and in seeding.
+Build a Next.js website in TypeScript, using Bun and an existing, externally managed SQLite database, around a deterministic, auditable selection and seeding engine for a hypothetical FBS playoff. The operator-supplied SQLite database is the source of sports data: the app must not call CollegeFootballData or any other sports-data API, and it must not require an API credential. Calculate Colley ratings internally from stored game results. Apply AP/CFP top-ups, a regular-season winning-percentage floor, and clean head-to-head overrides across selection boundaries and in seeding.
 
 Support navigation for every season from 1998 through the current season, including the ongoing season (2026 when this handoff was updated); derive the current season dynamically, not from a hardcoded end year. Database coverage may be narrower: list unsupported or missing years with an explicit data-incomplete state rather than removing them or fabricating results. Add older seasons only as a separately configured expansion. Implement the website, engine, structured results, and tests. Website brackets are in scope; PDF/booklet generation is not a deliverable. Do not use team logos anywhere.
 
-This Markdown file describes the product and policy requirements. The existing repository contains the database contract in `packages/chars-db/src/schema.ts` and an example read path in `site/lib/archive.ts`; use them rather than inventing a second schema. An operator supplies a path to an existing SQLite database through required `DATABASE_PATH`. Database creation, population, correction, backup, and maintenance are external responsibilities, not deliverables of this app. A fresh checkout need not contain a database file or a current-season fixture. Missing configuration, tables, seasons, games, or required poll releases must produce clear setup/incomplete states, never apparently final results or proved mathematical status labels.
+This Markdown file describes the product and policy requirements. The existing repository's `packages/chars-db/src/schema.ts` is a shape reference for the supplied database, not an instruction to create or migrate it. `site/lib/archive.ts` is **not** a safe read-only connection example: it calls `openDatabase()` from `packages/chars-db/src/database.ts`, which enables database creation and sets WAL mode. Do not reuse that connection implementation for this app's reads. An operator supplies a path to an existing SQLite database through required `DATABASE_PATH`. Database creation, population, correction, backup, and maintenance are external responsibilities, not deliverables of this app. A fresh checkout need not contain a database file or a current-season fixture. Missing configuration, tables, seasons, games, or required poll releases must produce clear setup/incomplete states, never apparently final results or proved mathematical status labels.
 
 ## Website product requirements
 
@@ -30,7 +30,7 @@ Distinguish **current/provisional selection** from **end-of-season mathematical 
 
 - Next.js App Router, strict TypeScript, Bun as package manager/runtime/test runner, a committed Bun lockfile, and pinned compatible stable dependency versions. Use double quotes in TypeScript.
 - Server-render season lists and ranking data. Use client components for week controls, filters, and interactive bracket details. Keep database access and its configured path server-only.
-- Use `bun:sqlite` behind a typed, read-only repository layer against the supplied `DATABASE_PATH`. Validate the required tables and columns before computing. Use parameterized queries and a consistent read view of the external database; do not write to it, run migrations, or assume ownership of its WAL, transactions, or maintenance.
+- Use `bun:sqlite` behind a typed, read-only repository layer against the supplied `DATABASE_PATH`. Open it with `new Database(path, { readonly: true, create: false })` or an equivalent explicitly read-only, no-create connection; never fall back to a default path or silently create an empty database. Do not use write PRAGMAs (including `journal_mode = WAL`), write transactions, migrations, or any other source-database writes. Validate the required tables and columns before computing; use parameterized queries and a consistent read view without assuming ownership of database maintenance.
 - Run Next.js on a Bun-capable host with access to the operator-supplied SQLite path. Keep expensive scenario computation outside request rendering; do not assume an Edge runtime provides Bun APIs. If caching derived results, use a separate ignored `.cache/` directory, not tables in the source database.
 - Separate pure modules for `colley`, `eligibility`, `selection`, `head-to-head`, `seeding`, `brackets`, and `scenarios`, with a read-only repository, computation jobs if needed, and UI components. A scenario must invoke the same selection engine used by a real snapshot.
 - Publish only complete computed results. Optional JSON snapshot/scenario caches can use atomic file replacement and manifests keyed by source-data revision (or validated content hash), snapshot cutoffs, policy and model versions. Detect external DB changes and refresh affected results; alternatively, an independently scheduled computation job may refresh the cache. Neither mechanism may manage or write the database. Show cache age, pending computation, and data incompleteness separately from team status; never present stale results as current.
@@ -38,7 +38,7 @@ Distinguish **current/provisional selection** from **end-of-season mathematical 
 
 ## Supplied SQLite data contract and coverage
 
-The application reads the operator's existing SQLite file; it does not create, migrate, seed, correct, or manage it. `packages/chars-db/src/schema.ts` defines the current contract, and `site/lib/archive.ts` shows the existing `DATABASE_PATH`-based read pattern. At minimum, validate these tables and columns before serving computed results:
+The application reads the operator's existing SQLite file; it does not create, migrate, seed, correct, or manage it. `packages/chars-db/src/schema.ts` describes the current table shape only. Despite its read queries, `site/lib/archive.ts` uses the create-enabled/WAL-setting `openDatabase()` helper and must not be copied as a connection pattern. At minimum, validate these tables and columns before serving computed results:
 
 | Existing table | Read-only meaning |
 | --- | --- |
@@ -117,7 +117,7 @@ Set explicit CPU/memory budgets and optionally persist resumable work in ignored
 - Rating/selection boundaries, .750 exclusions, head-to-head explanations, and shortened fields are visible. A poll containing an 8–4 team cannot admit that team, including when the field otherwise stays below twelve.
 - No team-logo files, imported logo components, logo URLs, or external image requests appear in rendered pages.
 - All ratings are computed internally; numerical fixtures and exact threshold tests pass. Reordering input games or teams does not change results.
-- Missing `DATABASE_PATH`, an inaccessible file, or absent required tables/columns produces a clear setup state. Missing years, unverified schedules, or required poll releases produce explicit data-incomplete states without fabricated final brackets or proved status labels. No database write is attempted by the app.
+- Missing `DATABASE_PATH`, an inaccessible/nonexistent file, or absent required tables/columns produces a clear setup state without creating a database file. Missing years, unverified schedules, or required poll releases produce explicit data-incomplete states without fabricated final brackets or proved status labels. Tests verify the source connection is read-only, does not run write PRAGMAs, and cannot mutate the database.
 - External score, kickoff/week, classification, fixture, and poll changes invalidate dependent derived revisions; cache publication is atomic. A failed refresh does not relabel old results as current or conceal a coverage gap.
 - Weekly reconstruction cannot read later completed results or a later poll. Early-season AP fallback and poll publication timing are explicit. Missing data never appears as a proved Eliminated label.
 - Small scenario fixtures cover each quantified label, poll-dependent qualification, an ineligible current record that can recover, win-out insufficiency, the four-label coverage exception, shared-game consistency, and solver timeout.
@@ -128,7 +128,7 @@ Set explicit CPU/memory budgets and optionally persist resumable work in ignored
 Document the existing database contract in `packages/chars-db/src/schema.ts`, validate its required shape at runtime, and pin compatible dependency versions at build time.
 
 - [Colley's original matrix-method paper](https://www.colleyrankings.com/matrate.pdf) and [FCS-group extension](https://colleyrankings.com/iaagroups.html). The selected FBS-only default and published grouped rankings are different model configurations.
-- [Next.js with Bun](https://bun.sh/guides/ecosystem/nextjs), [Bun SQLite](https://bun.sh/docs/runtime/sqlite), and [Next.js self-hosting](https://nextjs.org/docs/app/guides/self-hosting). Repository references: `packages/chars-db/src/schema.ts` and `site/lib/archive.ts`.
+- [Next.js with Bun](https://bun.sh/guides/ecosystem/nextjs), [Bun SQLite](https://bun.sh/docs/runtime/sqlite), and [Next.js self-hosting](https://nextjs.org/docs/app/guides/self-hosting). Use `packages/chars-db/src/schema.ts` as the table-shape reference; existing `openDatabase()` and its callers are not read-only connection references.
 
 Keep policy defaults visible: cycle scope, outsider admission path, FCS rating treatment, odd play-in byes, fixed winner slots, and future-poll/scenario assumptions. All selection and seeding rules are specified in the following sections.
 
@@ -349,21 +349,22 @@ Use synthetic fixtures first; historical records are integration tests, not subs
 
 Also validate the termination argument on generated small DAGs and validate that the final seeding order satisfies every seeding edge. A second run from the same original inputs must reproduce the output; do not feed a previous final field back into initial selection as an idempotence shortcut.
 
-## Fresh-workspace implementation and delivery
+## Existing-repository implementation and delivery
 
-Continue the existing repository and use its `packages/chars-db/src/schema.ts` contract and `site/lib/archive.ts` read path. A suggested organization for new application code is:
+Continue the existing monorepo and use `packages/chars-db/src/schema.ts` only to understand the supplied table shape. Establish a separate read-only, no-create connection for this app; do not reuse `site/lib/archive.ts` or its `openDatabase()` helper as the connection implementation. Extend the existing layout rather than scaffolding another app; optional directories are only needed if the implementation uses them:
 
 ```text
-app/page.tsx
-app/seasons/[year]/page.tsx
-components/
-src/domain/{colley,eligibility,selection,head-to-head,seeding,brackets,scenarios}.ts
-src/data/repositories/
-src/computation/
-scripts/
-tests/fixtures/
-.env.example
-README.md
+packages/chars-algorithm/src/        # existing pure Colley, selection, bracket, scenario modules
+packages/chars-algorithm/tests/      # algorithm and synthetic fixtures
+packages/chars-db/src/schema.ts      # existing external table-shape reference only
+packages/chars-db/src/              # read-only repository/computation code as appropriate
+packages/chars-db/tests/            # database-contract and coverage tests
+site/app/page.tsx                    # existing Next.js home page
+site/app/seasons/[year]/             # season and weekly views
+site/lib/                            # server-side data access and presentation helpers
+site/components/                     # optional reusable UI components
+site/.env.example                    # database-path configuration example
+site/README.md                       # site setup and deployment documentation
 ```
 
 Document required `DATABASE_PATH` (the operator-supplied absolute path to the existing SQLite file), `START_SEASON=1998`, and scenario computation budgets in `.env.example` and README. Keep the database file and any optional `.cache/` JSON outside version control. Never silently create an empty file at a missing database path. Derive the current football season from a configured football calendar and the present date, not the last year with rows and not a naive assumption that a January postseason belongs to the new calendar year's season. Show the current year even if the operator's database does not yet cover it.
