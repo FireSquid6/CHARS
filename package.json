@@ -5,13 +5,14 @@
   "workspaces": ["site", "packages/*"],
   "scripts": {
     "dev": "bun --env-file=.env run --filter site dev",
-    "build": "bun run --filter app build",
-    "start": "bun run --filter app start",
-    "lint": "bun run --filter app lint",
-    "typecheck": "bun run --filter app typegen && bun run --filter app typecheck && bun run --filter chars-db typecheck && bun run --filter chars-algorithm typecheck",
+    "build": "bun run --filter site build",
+    "start": "bun run --filter site start",
+    "lint": "bun run --filter site lint",
+    "typecheck": "bunx tsc --noEmit -p site/tsconfig.json && bun run --filter chars-db typecheck && bun run --filter chars-algorithm typecheck",
     "test": "bun test",
     "db:generate": "bun run --filter chars-db db:generate",
-    "db:migrate": "bun packages/chars-db/src/migrate.ts"
+    "db:migrate": "bun packages/chars-db/src/migrate.ts",
+    "snapshots:rebuild": "bun packages/chars-db/src/rebuild.ts"
   },
   "trustedDependencies": ["sharp", "unrs-resolver"]
 }

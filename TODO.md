@@ -12,11 +12,11 @@
 
 ## 2. Persistent inputs, snapshots and backfill
 
-- [ ] **Schema constraint: do not replace or alter the existing SQLite schema/migrations without explicit approval.** `packages/chars-db/src/schema.ts` has only teams, conferences, team-seasons, regular games and poll releases/entries. It lacks snapshot/game revisions, application game classification and completion state, ingestion payloads, scenario jobs, sync runs and leases required by `PROJECT.md`. Under the no-schema constraint, durable audited snapshots, temporal correctness, durable scheduling and proofs cannot be delivered as specified. Design an additive, approved migration strategy or document a separately approved storage mechanism before claiming these complete.
+- [ ] **Schema constraint: do not replace or alter the existing SQLite schema/migrations without explicit approval.** Existing tables lack completion/classification, revision, snapshot and lease columns. An ignored `.cache` file store is allowed for typed source metadata and atomic JSON snapshot publication without changing tables; this implements a limited audited retrospective read path, not transactional SQLite publication, a durable scheduler, or proved status. Design approved additive migrations or a more robust coordinated external store before claiming the entire product complete.
 - [ ] Validate live CFBD games, membership, calendar and poll schemas; server-only API key, authenticated fetch, canonical IDs/aliases, season-specific FBS/FCS membership and data provenance.
 - [ ] Backfill 1998 through provider/calendar-derived current season, including schedules, FCS opponents, season-specific poll releases and coverage gaps; provide absent-key setup/error state and `.env.example`.
-- [ ] Define pre-CCG freeze per season, completed-game and poll cutoffs, Week 0/partial-week calendar mapping, no later results/polls, CFP 2014+ or AP through 2013, provisional AP fallback, and completeness checks.
-- [ ] Implement transactional migration/repository/revision and atomic snapshot publication with policy/model/source hashes, appropriate indexes, WAL/foreign keys/busy timeout, cache invalidation, stale vs incomplete indicators.
+- [ ] Pre-CCG freeze requires an operator-verified calendar and complete classification; retrospective weekly builder isolates completed games by kickoff/week and polls by release/week, with provisional AP fallback and explicit gaps. Historical completion times, current partial weeks, comprehensive schedule coverage validation and provider-derived calendars remain unimplemented.
+- [ ] Typed read-only bun:sqlite repository and content-addressed JSON artifacts with atomic manifest replacement, hashes and coverage/pending indicators are implemented in `packages/chars-db/src/`. SQLite revisions, transactional coordination with source writes, live cache invalidation and stale status remain open.
 
 ## 3. Website and bracket UI
 
