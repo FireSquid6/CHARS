@@ -20,10 +20,10 @@
 
 ## 3. Website and bracket UI
 
-- [ ] Home list for 1998–current season including preseason/current/final/incomplete and working season links.
-- [ ] Season page: latest or frozen final selection by default, shareable `?week=` controls and history; complete FBS table, search, eligible/ineligible records, ranks, rating boundaries, routes, swaps and short-field explanations.
-- [ ] Accessible final bracket with alternatives/byes/fixed seeds; no logos or real-world winner substitution. Non-final view: four bubble filters/counts, team details, witnesses, and clearly separate pending/unproved/data states.
-- [ ] Responsive, keyboard and screen-reader/browser tests; no API keys in assets; server-render from published results only.
+- [x] Home list for 1998–dynamic July–June current season with setup/current/final/incomplete states and season links (calendar timezone configurable via `SYNC_TIMEZONE`).
+- [x] Server-render published snapshots for the default verified final or latest, shareable `?week=` navigation, complete FBS ranking/search/all-teams table, boundaries, original routes, category swaps and short-field explanations. Legacy team schedule links remain available when SQLite is configured.
+- [x] Accessible final bracket with alternatives/byes/fixed seeds and no logos or winner substitution; four weekly bubble filters show zero proved and explicitly pending/unproved until a scenario publisher exists.
+- [ ] Browser/screen-reader integration tests and real-season coverage validation; offline publication/timezone tests and responsive/keyboard-friendly markup added. No proved weekly witnesses or team details are available yet (section 4).
 
 ## 4. Exact scenarios and status proofs — computational limitation
 
