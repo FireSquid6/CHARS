@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { openDatabase } from "../src/index";
 import { migrate } from "../src/migrate";
 import { solveSnapshot } from "../src/scenarios";
+import { claimScenarioWork, workScenarios } from "../src/scenario-worker";
 
 const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach(path => rmSync(path, { recursive: true, force: true })));
@@ -45,7 +46,7 @@ async function fixture() {
     VALUES ('week',1,'2026-10-02T00:00:00.000Z','current')`).run();
   for (const id of ["a1", "a2", "b1", "b2"])
     db.query("INSERT INTO snapshot_games VALUES ('week',1,?,1)").run(id);
-  return { db, game };
+  return { db, game, path: join(path, "test.db") };
 }
 
 test("bounded retries restart; only exhaustive run publishes terminal labels atomically", async () => {
@@ -68,6 +69,65 @@ test("bounded retries restart; only exhaustive run publishes terminal labels ato
     const proof = db.query<{ proof_metadata_json: string }, []>(
       "SELECT proof_metadata_json FROM scenario_statuses WHERE team_id='A'").get();
     expect(JSON.parse(proof!.proof_metadata_json).evaluatedCompletions).toBe(2);
+  } finally { db.close(); }
+});
+
+test("two connections fence queue ownership; expired owner and scenario job cannot publish", async () => {
+  const { db, path } = await fixture();
+  const peer = openDatabase({ path });
+  try {
+    db.query("INSERT INTO scenario_work_queue (snapshot_key,snapshot_revision,state,updated_at_utc) VALUES ('week',1,'pending',?)")
+      .run(new Date().toISOString());
+    const first = claimScenarioWork(db)!;
+    expect(claimScenarioWork(peer)).toBeNull();
+    const budget = { maxCompletions: 2, maxRuntimeMs: 10000, maxTrackedPollPaths: 100 };
+    expect(() => solveSnapshot(db, "week", budget, () => {
+      peer.query("UPDATE scenario_work_queue SET expires_at_utc='2000-01-01T00:00:00.000Z' WHERE snapshot_key='week'").run();
+    }, { owner: first.owner, revision: 1 })).toThrow(/queue lease lost or expired/);
+    expect(db.query("SELECT * FROM scenario_statuses").all()).toHaveLength(0);
+    const second = claimScenarioWork(peer)!;
+    expect(second.owner).not.toBe(first.owner);
+    expect(() => solveSnapshot(db, "week", budget, undefined, { owner: first.owner, revision: 1 }))
+      .toThrow(/queue lease lost or expired/);
+    expect(() => solveSnapshot(peer, "week", budget, () => {
+      db.query("UPDATE scenario_jobs SET lease_expires_utc='2000-01-01T00:00:00.000Z'").run();
+    }, { owner: second.owner, revision: 1 })).toThrow(/Scenario lease lost or expired/);
+    expect(db.query("SELECT * FROM scenario_statuses").all()).toHaveLength(0);
+    expect(solveSnapshot(peer, "week", budget, undefined, { owner: second.owner, revision: 1 }).state).toBe("proved");
+  } finally { peer.close(); db.close(); }
+});
+
+test("budget pending is unproved and backs off; invocation cannot re-run same key", async () => {
+  const { db } = await fixture();
+  try {
+    db.query("INSERT INTO scenario_work_queue (snapshot_key,snapshot_revision,state,updated_at_utc) VALUES ('week',1,'pending',?)")
+      .run(new Date().toISOString());
+    const budgeted: typeof solveSnapshot = (database, key, _budget, _hook, fence) =>
+      solveSnapshot(database, key, { maxCompletions: 1, maxRuntimeMs: 10000, maxTrackedPollPaths: 100 }, undefined, fence);
+    expect(workScenarios(db, 5, budgeted)).toEqual([{ key: "week", state: "pending" }]);
+    const row = db.query<{ state: string; attempts: number; next_eligible_utc: string }, []>(
+      "SELECT state,attempts,next_eligible_utc FROM scenario_work_queue").get()!;
+    expect(row).toMatchObject({ state: "pending", attempts: 0 });
+    expect(row.next_eligible_utc > new Date().toISOString()).toBe(true);
+    expect(db.query("SELECT * FROM scenario_statuses WHERE state='proved'").all()).toHaveLength(0);
+    expect(workScenarios(db, 5, budgeted)).toEqual([]);
+  } finally { db.close(); }
+});
+
+test("expired third attempt is marked failure instead of stuck running; failures back off", async () => {
+  const { db } = await fixture();
+  try {
+    db.query(`INSERT INTO scenario_work_queue
+      (snapshot_key,snapshot_revision,state,updated_at_utc,attempts,owner,expires_at_utc)
+      VALUES ('week',1,'running',?,3,'lost','2000-01-01T00:00:00.000Z')`).run(new Date().toISOString());
+    expect(claimScenarioWork(db)).toBeNull();
+    expect(db.query<{ state: string; error: string }, []>("SELECT state,error FROM scenario_work_queue").get())
+      .toMatchObject({ state: "failure", error: "Scenario worker lease expired after maximum failed attempts" });
+    db.query("UPDATE scenario_work_queue SET state='pending',attempts=2,next_eligible_utc=NULL").run();
+    const fails: typeof solveSnapshot = () => { throw Error("transient"); };
+    expect(workScenarios(db, 5, fails)).toEqual([{ key: "week", state: "failure" }]);
+    expect(db.query<{ state: string; attempts: number }, []>("SELECT state,attempts FROM scenario_work_queue").get())
+      .toMatchObject({ state: "failure", attempts: 3 });
   } finally { db.close(); }
 });
 

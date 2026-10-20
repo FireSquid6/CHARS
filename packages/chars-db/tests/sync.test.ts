@@ -6,7 +6,7 @@ import { openDatabase } from "../src/index";
 import { fetchSeason } from "../src/ingest";
 import { migrate } from "../src/migrate";
 import { publishedSnapshot } from "../src/snapshots";
-import { claimSync, scheduledKey, syncData } from "../src/sync";
+import { claimSync, scheduledKey, syncData, syncHealth } from "../src/sync";
 import type { SeasonInput } from "../src/ingest";
 
 const dirs: string[] = [];
@@ -98,5 +98,39 @@ test("poll and calendar revisions invalidate dependent weekly snapshot; empty fa
     expect(publishedSnapshot(db, "1998:week:1")?.revision).toBeGreaterThan(second.revision);
     await expect(syncData(db, manual("empty", () => input([], poll(2), weeks)))).rejects.toThrow("Empty game response");
     expect(db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM games").get()?.count).toBe(1);
+  } finally { peer.close(); db.close(); }
+});
+
+test("late week correction verifies and restores unaffected earlier publication without revision", async () => {
+  const { db, peer } = await setup();
+  try {
+    const firstGame = { ...game, completed: true, status: "completed", homePoints: 7, awayPoints: 3 };
+    const later = { ...game, id: 11, week: 2, startDate: "1998-09-12T20:00:00Z" };
+    const weeks = [week, { ...week, week: 2, startDate: "1998-09-09T00:00:00Z", endDate: "1998-09-16T00:00:00Z" }];
+    await syncData(db, manual("before-later", () => input([firstGame, later], [], weeks)));
+    const early = publishedSnapshot(db, "1998:week:1")!;
+    const second = publishedSnapshot(db, "1998:week:2")!;
+    await syncData(peer, manual("late-week", () => input([firstGame, { ...later, completed: true,
+      status: "completed", homePoints: 13, awayPoints: 10 }], [], weeks)));
+    expect(publishedSnapshot(db, "1998:week:1")).toEqual(early);
+    expect(db.query<{ state: string }, []>("SELECT state FROM snapshot_publications WHERE snapshot_key='1998:week:1'").get()?.state)
+      .toBe("current");
+    expect(publishedSnapshot(db, "1998:week:2")?.revision).toBeGreaterThan(second.revision);
+  } finally { peer.close(); db.close(); }
+});
+
+test("scheduled retry retains Sunday's planned range on Monday; health separates last success", async () => {
+  const { db, peer } = await setup();
+  try {
+    await syncData(db, manual("healthy", () => input()));
+    const sunday = "daily:2026-10-18";
+    claimSync(db, sunday, new Date(), { current: 2026, recent: 2, timezone: "America/Chicago" });
+    db.query("UPDATE job_leases SET expires_at_utc='2000-01-01T00:00:00.000Z'").run();
+    let fetched = 0;
+    await expect(syncData(peer, { key: sunday, currentSeason: 1998, recentSeasons: 0,
+      fetch: async year => { fetched = year; throw Error("offline"); } })).rejects.toThrow("offline");
+    expect(fetched).toBe(2024);
+    expect(syncHealth(db).lastSuccess?.scheduled_key).toBe("manual:healthy");
+    expect(syncHealth(db).lastRun?.scheduled_key).toBe(sunday);
   } finally { peer.close(); db.close(); }
 });

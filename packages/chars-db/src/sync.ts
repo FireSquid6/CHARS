@@ -7,7 +7,8 @@ import { currentFootballSeason, fetchSeason, ingestSeason, type SeasonInput } fr
 import { migrate } from "./migrate";
 import { rebuildSnapshots, planSnapshots, publishedSnapshot } from "./snapshots";
 
-type Run = { id: string; state: string; started_at_utc: string };
+type Run = { id: string; state: string; started_at_utc: string; planned_current_season: number | null;
+  planned_recent_seasons: number | null; planned_timezone: string | null };
 const one = <T>(db: Database, sql: string, ...args: (string | number)[]) => db.query(sql).get(...args) as T | null;
 const all = <T>(db: Database, sql: string, ...args: (string | number)[]) => db.query(sql).all(...args) as T[];
 const iso = (date: Date) => date.toISOString();
@@ -21,7 +22,17 @@ export function scheduledKey(now: Date, timezone = "America/Chicago"): string {
   return `daily:${field("year")}-${field("month")}-${field("day")}`;
 }
 
-export function claimSync(db: Database, key: string, now = new Date()): string | null {
+type Plan = { current: number; recent: number; timezone: string };
+function planFor(key: string, now: Date, timezone: string): Plan {
+  // A scheduled retry belongs to its original local date, not the day of the retry.
+  const scheduled = key.startsWith("daily:");
+  const date = scheduled ? new Date(`${key.slice(6)}T12:00:00Z`) : now;
+  const current = currentFootballSeason(date);
+  const recent = !scheduled || date.getUTCDay() === 0 ? 2 : 0;
+  return { current, recent, timezone };
+}
+
+export function claimSync(db: Database, key: string, now = new Date(), plan?: Plan): string | null {
   if (!/^(daily:\d{4}-\d{2}-\d{2}|manual:[\w-]+)$/.test(key)) throw new Error("Invalid sync key");
   const owner = randomUUID(), stamp = iso(now);
   return transaction(db, () => {
@@ -35,9 +46,16 @@ export function claimSync(db: Database, key: string, now = new Date()): string |
     // An abandoned run is explicitly closed before a replacement is admitted.
     db.query(`UPDATE sync_runs SET state='failure', ended_at_utc=?,error='Worker lease expired before completion'
       WHERE state='running'`).run(stamp);
-    db.query(`INSERT INTO sync_runs (id,scheduled_key,state,started_at_utc) VALUES (?,?,'running',?)
+    const planned = existing?.planned_current_season !== null && existing?.planned_current_season !== undefined &&
+      existing.planned_recent_seasons !== null ? { current: existing.planned_current_season,
+        recent: existing.planned_recent_seasons, timezone: existing.planned_timezone ?? "America/Chicago" } :
+      plan ?? planFor(key, now, "America/Chicago");
+    db.query(`INSERT INTO sync_runs (id,scheduled_key,state,started_at_utc,planned_current_season,planned_recent_seasons,planned_timezone)
+      VALUES (?,?,'running',?,?,?,?)
       ON CONFLICT(scheduled_key) DO UPDATE SET id=excluded.id,state='running',started_at_utc=excluded.started_at_utc,
-        ended_at_utc=NULL,counts_json='{}',error=NULL`).run(owner, key, stamp);
+        ended_at_utc=NULL,counts_json='{}',error=NULL,planned_current_season=excluded.planned_current_season,
+        planned_recent_seasons=excluded.planned_recent_seasons,planned_timezone=excluded.planned_timezone`)
+      .run(owner, key, stamp, planned.current, planned.recent, planned.timezone);
     return owner;
   });
 }
@@ -105,20 +123,25 @@ export function syncHealth(db: Database) {
     "SELECT owner,expires_at_utc FROM job_leases WHERE name=?", leaseName),
     lastRun: one<Run & { scheduled_key: string; ended_at_utc: string | null; counts_json: string; error: string | null }>(db,
       "SELECT * FROM sync_runs ORDER BY started_at_utc DESC LIMIT 1"),
+    lastSuccess: one<Run & { scheduled_key: string; ended_at_utc: string | null }>(db,
+      "SELECT * FROM sync_runs WHERE state='success' ORDER BY ended_at_utc DESC LIMIT 1"),
     pendingScenarios: one<{ count: number }>(db,
       "SELECT COUNT(*) AS count FROM scenario_work_queue WHERE state='pending'")?.count ?? 0 };
 }
 
 export async function syncData(db: Database, options: SyncOptions) {
   const now = options.now ?? new Date();
-  const owner = claimSync(db, options.key, now);
+  const timezone = options.timezone ?? "America/Chicago";
+  const defaultPlan = planFor(options.key, now, timezone);
+  const owner = claimSync(db, options.key, now, { current: options.currentSeason ?? defaultPlan.current,
+    recent: options.recentSeasons ?? defaultPlan.recent, timezone });
   if (!owner) return { skipped: true, key: options.key };
   const counts = { seasons: [] as number[], inserted: 0, revised: 0, published: [] as string[], queued: 0 };
   try {
     await options.afterClaim?.();
-    const current = options.currentSeason ?? currentFootballSeason(now);
-    const recent = options.recentSeasons ?? (options.key.startsWith("manual:") ||
-      new Intl.DateTimeFormat("en-US", { weekday: "short", timeZone: options.timezone ?? "America/Chicago" }).format(now) === "Sun" ? 2 : 0);
+    const planned = one<Run>(db, "SELECT * FROM sync_runs WHERE id=?", owner)!;
+    const current = planned.planned_current_season!;
+    const recent = planned.planned_recent_seasons!;
     if (!Number.isSafeInteger(current) || current < 1998 || !Number.isSafeInteger(recent) || recent < 0 || recent > 5)
       throw new Error("Invalid sync season range");
     const fetcher = options.fetch ?? fetchSeason.bind(null, createClient());
@@ -127,6 +150,8 @@ export async function syncData(db: Database, options: SyncOptions) {
       const input = await fetcher(year); // No network or retry sleep in a write transaction.
       renew(db, owner);
       const before = previousGames(db, year);
+      const priorGeneration = one<{ generation: number }>(db,
+        "SELECT generation FROM season_input_generations WHERE season=?", year)?.generation ?? 0;
       if (before.size && input.games.items.length === 0)
         throw new Error(`Empty game response for previously populated season ${year}; previous data preserved`);
       const report = transaction(db, () => { assertLease(db, owner); return ingestSeason(db, year, input); });
@@ -151,6 +176,13 @@ export async function syncData(db: Database, options: SyncOptions) {
           SELECT s.snapshot_key,s.revision,'pending',? FROM snapshot_publications p
           JOIN snapshots s ON s.snapshot_key=p.snapshot_key AND s.revision=p.revision
           WHERE s.season=? AND s.kind<>'selection_final' AND p.state='current'`).run(iso(new Date()), year);
+        // A fixed weekly ranking can still have a different remaining schedule after reconciliation.
+        db.query(`UPDATE scenario_work_queue SET state='pending',attempts=0,next_eligible_utc=NULL,
+          error=NULL,updated_at_utc=? WHERE snapshot_key IN
+          (SELECT snapshot_key FROM snapshots WHERE season=?) AND state IN ('done','failure')
+          AND snapshot_revision IN (SELECT revision FROM snapshot_publications WHERE snapshot_key=scenario_work_queue.snapshot_key)
+          AND EXISTS (SELECT 1 FROM season_input_generations WHERE season=? AND generation>?)`)
+          .run(iso(new Date()), year, year, priorGeneration);
         counts.queued = one<{ count: number }>(db, "SELECT COUNT(*) AS count FROM scenario_work_queue WHERE state='pending'")?.count ?? 0;
       });
     }

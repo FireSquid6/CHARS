@@ -138,6 +138,11 @@ describe("HTTP boundary", () => {
       fetch: async () => ++calls === 1 ? new Response("quota", { status: 429, headers: { "retry-after": "2" } }) : Response.json([game]) });
     expect((await client.games(2026)).items).toHaveLength(1);
     expect(delays).toEqual([2000]);
+    let deferredCalls = 0;
+    const deferred = createClient({ apiKey: "test-key", retries: 2, sleep: async () => { throw Error("must not sleep"); },
+      fetch: async () => { deferredCalls++; return new Response("quota", { status: 429, headers: { "retry-after": "60" } }); } });
+    await expect(deferred.games(2026)).rejects.toMatchObject({ status: 429, message: "CFBD HTTP 429; retry deferred by provider" });
+    expect(deferredCalls).toBe(1);
     const denied = createClient({ apiKey: "test-key", fetch: mock({ "/games": new Response("secret", { status: 401 }) }) });
     await expect(denied.games(2026)).rejects.toMatchObject({ status: 401, message: "CFBD HTTP 401" });
   });

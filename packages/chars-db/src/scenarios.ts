@@ -13,13 +13,14 @@ type Job = { id: string; state: string; input_hash: string; input_generation: nu
   checkpoint_json: string | null; lease_owner: string | null; lease_expires_utc: string | null };
 type Budget = { maxCompletions: number; maxRuntimeMs: number; maxTrackedPollPaths: number;
   allowHistoricalTies?: boolean };
+export type QueueFence = { owner: string; revision: number };
 const one = <T>(db: Database, sql: string, ...bindings: (number | string)[]) => db.query(sql).get(...bindings) as T | null;
 const all = <T>(db: Database, sql: string, ...bindings: (number | string)[]) => db.query(sql).all(...bindings) as T[];
 const sha = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 export function solveSnapshot(db: Database, key: string, budget: Budget = {
   maxCompletions: 1000, maxRuntimeMs: 5000, maxTrackedPollPaths: 10000
-}, beforePublish?: () => void) {
+}, beforePublish?: () => void, queueFence?: QueueFence) {
   const owner = randomUUID();
   const now = new Date().toISOString();
   const loaded = transaction(db, () => {
@@ -81,6 +82,14 @@ export function solveSnapshot(db: Database, key: string, budget: Budget = {
   const { input, generation, inputHash } = loaded;
   const jobId = sha([key, input.snapshot.revision, POLL_MODEL_VERSION, SOLVER_VERSION, inputHash]);
   const guard = () => {
+    if (queueFence) {
+      const lease = one<{ owner: string | null; expires_at_utc: string | null; state: string }>(db,
+        "SELECT owner,expires_at_utc,state FROM scenario_work_queue WHERE snapshot_key=? AND snapshot_revision=?",
+        key, queueFence.revision);
+      if (queueFence.revision !== input.snapshot.revision || lease?.state !== "running" ||
+        lease.owner !== queueFence.owner || !lease.expires_at_utc || lease.expires_at_utc <= new Date().toISOString())
+        throw new Error("Scenario queue lease lost or expired");
+    }
     const pub = one<{ revision: number; state: string }>(db,
       "SELECT revision, state FROM snapshot_publications WHERE snapshot_key=?", key);
     const current = one<{ generation: number }>(db,
@@ -129,7 +138,8 @@ export function solveSnapshot(db: Database, key: string, budget: Budget = {
     transaction(db, () => {
       guard();
       const current = one<Job>(db, "SELECT * FROM scenario_jobs WHERE id=?", jobId);
-      if (current?.lease_owner !== owner) throw new Error("Scenario lease lost");
+      if (current?.lease_owner !== owner || !current.lease_expires_utc || current.lease_expires_utc <= new Date().toISOString())
+        throw new Error("Scenario lease lost or expired");
       // An earlier attempt has no certified prefix. Its witnesses cannot
       // contribute to the new run's exhaustive classification.
       db.query("DELETE FROM scenario_witnesses WHERE job_id=?").run(jobId);

@@ -187,7 +187,10 @@ export function createClient(options: ClientOptions = {}) {
         if ((response.status === 429 || response.status >= 500) && attempt < retries) {
           const retryAfter = response.headers.get("retry-after");
           const seconds = retryAfter && /^\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : retryAfter ? Date.parse(retryAfter) - Date.now() : 0;
-          await sleep(Math.min(30000, Math.max(250 * 2 ** attempt, Number.isFinite(seconds) ? seconds : 0)));
+          const delay = Math.max(250 * 2 ** attempt, Number.isFinite(seconds) ? seconds : 0);
+          // Never retry earlier than the provider permits; defer instead of sleeping unboundedly.
+          if (delay > 30000) throw new CfbdError(`CFBD HTTP ${response.status}; retry deferred by provider`, response.status);
+          await sleep(delay);
           continue;
         }
         throw new CfbdError(`CFBD HTTP ${response.status}`, response.status);
