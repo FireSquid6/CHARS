@@ -9,6 +9,20 @@ export type Input = Awaited<ReturnType<ReturnType<typeof createCfbdClient>["seas
 export const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 export type Audit = { season: number; observedAtUtc: string; sources: { url: string; hash: string; raw: unknown }[]; games: Record<string, SourceGameMetadata>; postseason: { id: number; type: string; payloadHash: string; kickoffUtc: string }[]; coverage: string[]; counts: { inserted: number; updated: number; unchanged: number }; pollHash: string; membershipHash: string; calendarHash: string; material: boolean };
 
+export type CalendarCandidate = { freezeUtc: string; firstCcgUtc: string; verified: false; provenance: "cfbd-calendar-and-explicit-ccg" };
+/** A proposed cutoff, not proof that all historic schedules or poll releases are complete. */
+export function deriveCalendarCandidate(games: readonly { game: ProviderGame; type: SourceGameMetadata["applicationGameType"] }[], weeks: readonly ProviderWeek[]): CalendarCandidate | null {
+  if (games.some(row => row.type === "unknown")) return null;
+  const ccgs = games.filter(row => row.type === "ccg").map(row => row.game.startDate).sort();
+  if (!ccgs.length) return null;
+  const firstCcgUtc = ccgs[0]!;
+  const prior = weeks.filter(w => w.seasonType === "regular" && w.endUtc < firstCcgUtc).sort((a, b) => b.endUtc.localeCompare(a.endUtc));
+  const freezeUtc = prior[0]?.endUtc;
+  if (!freezeUtc || weeks.some(w => w.seasonType === "regular" && w.startUtc < firstCcgUtc && w.endUtc >= firstCcgUtc) ||
+    games.some(row => row.type === "regular" && row.game.startDate >= freezeUtc && row.game.startDate < firstCcgUtc)) return null;
+  return { freezeUtc, firstCcgUtc, verified: false, provenance: "cfbd-calendar-and-explicit-ccg" };
+}
+
 export function classify(game: ProviderGame, weeks: readonly ProviderWeek[], conferences: readonly string[]): SourceGameMetadata["applicationGameType"] {
   const notes = game.notes ?? "";
   const named = /\b([A-Za-z][A-Za-z0-9 .&-]{1,45})\s+championship(?:\s+game)?\b/i.exec(notes)?.[1]?.trim();
@@ -60,10 +74,18 @@ export async function ingest(db: Database, season: number, input: Input, cache: 
   for (const g of games) if (names.get(g.homeId) !== g.homeTeam || names.get(g.awayId) !== g.awayTeam) throw new Error("Opponent name/ID mismatch; previous data retained");
   const conferences = input.teams.items.map(t => t.conference).filter((c): c is string => !!c);
   const types = games.map(g => ({ game: g, type: classify(g, input.calendar.items, conferences) }));
+  const calendarCandidate = deriveCalendarCandidate(types, input.calendar.items);
   const coverage: string[] = [];
   if (types.some(t => t.type === "unknown")) coverage.push("Unknown game classification; review calendar and source notes");
   if (!input.rankings.items.length) coverage.push("No AP/CFP poll data");
   const old = await optional<Audit | null>(join(folder, `${season}-audit.json`), null);
+  const existingMembers = db.query<{ team_id: string }, [number]>("SELECT team_id FROM seasons WHERE year=?").all(season);
+  const missingMembers = existingMembers.filter(row => !ids.has(Number(row.team_id)));
+  for (const row of missingMembers) {
+    const referenced = db.query<{ game_id: number }, [number, string, string]>(
+      "SELECT game_id FROM games WHERE year=? AND (home_team=? OR away_team=?) LIMIT 1").get(season, row.team_id, row.team_id);
+    coverage.push(`Previously observed season team ${row.team_id} absent${referenced ? `; existing game ${referenced.game_id} still references it` : ""}; prior membership retained for review`);
+  }
   if (old) {
     const observed = new Set(games.map(g => String(g.id)));
     for (const id of [...Object.keys(old.games), ...old.postseason.map(g => String(g.id))]) if (!observed.has(id)) coverage.push(`Previously observed game ${id} absent; not treated as cancellation`);
@@ -138,6 +160,10 @@ export async function ingest(db: Database, season: number, input: Input, cache: 
     await atomic(pending, { audit, phase: "db-committed" });
     await atomic(join(folder, `${season}-games.json`), metadata);
     await atomic(join(folder, `${season}-audit.json`), audit);
+    await atomic(join(folder, `${season}-calendar-candidate.json`), {
+      candidate: audit.coverage.some(gap => gap !== "No AP/CFP poll data") ? null : calendarCandidate, observedAtUtc: audit.observedAtUtc,
+      note: "Operator must verify the full schedule and poll window before setting YEAR-calendar.json verified=true"
+    });
     await mkdir(join(folder, "revisions"), { recursive: true });
     await atomic(join(folder, "revisions", `${season}-${randomUUID()}.json`), audit);
     await rm(pending);

@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { readSeason, type SourceGameMetadata } from "../src/repository";
-import { buildSnapshots, publishSnapshots, readPublished } from "../src/snapshots";
+import { buildSnapshots, pollFingerprint, publishSnapshots, readPublished } from "../src/snapshots";
 
 function fixture() {
   const db = new Database(":memory:");
@@ -26,6 +26,11 @@ test("weekly results and polls never read subsequent weeks; final needs verified
     expect(first.includedGameIds).toEqual(["1"]);
     expect(first.pollReleaseId).toBe("ap1");
     expect(first.pollPolicy).toBe("ap-provisional-fallback");
+    const lateAp = base.polls.find(poll => poll.release.id === "ap1")!;
+    const correctedTiming = { ...base, pollTiming: { ap1: { reviewedBy: "fixture-reviewer",
+      reviewedAtUtc: "2024-09-17T00:00:00.000Z", source: "fixture-publication-record",
+      releasedAtUtc: "2024-09-09T00:00:00.000Z", pollFingerprint: pollFingerprint(lateAp) } } };
+    expect(buildSnapshots(correctedTiming)[0]?.pollReleaseId).toBeNull();
     const legacyWeek = buildSnapshots(readSeason(db, 2024))[0]!;
     expect(legacyWeek.includedGameIds).toEqual([]);
     expect(legacyWeek.coverage).toContain("game 1: completion/classification unverified");
@@ -44,10 +49,24 @@ test("weekly results and polls never read subsequent weeks; final needs verified
     expect(updatedFirst.rankings).toEqual(first.rankings);
     expect(updatedFirst.key).toBe(first.key);
     expect(updatedFirst.pollReleaseId).toBe(first.pollReleaseId);
-    const final = buildSnapshots(later, { freezeUtc: "2024-09-09T00:00:00.000Z", firstCcgUtc: "2024-09-15T00:00:00.000Z", verified: true })
+    const calendar = { freezeUtc: "2024-09-09T00:00:00.000Z", firstCcgUtc: "2024-09-15T00:00:00.000Z", verified: true };
+    expect(buildSnapshots(later, calendar).some(snapshot => snapshot.kind === "selection_final")).toBe(false);
+    const reviewedPoll = later.polls.find(poll => poll.release.id === "cfp2")!;
+    later.pollTiming = { cfp2: { reviewedBy: "fixture-reviewer", source: "fixture-independent-publication-record",
+      reviewedAtUtc: "2024-09-17T00:00:00.000Z", releasedAtUtc: "2024-09-10T00:00:00.000Z",
+      pollFingerprint: pollFingerprint(reviewedPoll) } };
+    const final = buildSnapshots(later, calendar)
       .find(snapshot => snapshot.kind === "selection_final");
     expect(final?.includedGameIds).toEqual(["1", "2"]);
     expect(final?.pollReleaseId).toBe("cfp2");
+    later.pollTiming!.cfp2 = { ...later.pollTiming!.cfp2!, releasedAtUtc: "2024-09-15T12:00:00.000Z" };
+    expect(buildSnapshots(later, calendar).some(snapshot => snapshot.kind === "selection_final")).toBe(false);
+    later.pollTiming!.cfp2 = { ...later.pollTiming!.cfp2!, releasedAtUtc: undefined,
+      interval: { earliestUtc: "2024-09-10T00:00:00.000Z", latestUtc: "2024-09-16T00:00:00.000Z" } };
+    expect(buildSnapshots(later, calendar).some(snapshot => snapshot.kind === "selection_final")).toBe(false);
+    later.pollTiming!.cfp2 = { ...later.pollTiming!.cfp2!, interval: undefined, releasedAtUtc: "2024-09-10T00:00:00.000Z",
+      pollFingerprint: "0".repeat(64) };
+    expect(buildSnapshots(later, calendar).some(snapshot => snapshot.kind === "selection_final")).toBe(false);
     expect(buildSnapshots(readSeason(db, 2024), { freezeUtc: "2024-09-09T00:00:00.000Z", firstCcgUtc: "2024-09-15T00:00:00.000Z", verified: true })
       .some(snapshot => snapshot.kind === "selection_final")).toBe(false);
     expect(buildSnapshots(later, { freezeUtc: "2024-09-14T00:00:00.000Z", firstCcgUtc: "2024-09-15T00:00:00.000Z", verified: true })
@@ -65,4 +84,40 @@ test("failed publication keeps previously published manifest and artifacts", asy
     await expect(publishSnapshots(directory, 2024, [snapshots[0]!, { ...snapshots[1]!, key: "../../invalid" }])).rejects.toThrow();
     expect(await readPublished(directory, 2024)).toEqual(previous);
   } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("active season publishes preseason and partial weeks, never future week scores or polls", () => {
+  const { db, metadata } = fixture();
+  try {
+    const source = readSeason(db, 2024, metadata);
+    const before = buildSnapshots(source, {}, "2024-08-31T12:00:00.000Z");
+    expect(before.map(snapshot => snapshot.kind)).toEqual(["partial"]);
+    expect(before[0]?.week).toBeNull();
+    expect(before[0]?.includedGameIds).toEqual([]);
+    expect(before[0]?.playoff.counts.selected).toBe(0);
+    expect(before[0]?.pollReleaseId).toBeNull();
+    const emptySchedule = buildSnapshots({ ...source, games: [], polls: [], coverage: ["missing season schedule"] }, {},
+      "2024-08-31T12:00:00.000Z");
+    expect(emptySchedule.map(snapshot => snapshot.kind)).toEqual(["partial"]);
+    expect(emptySchedule[0]?.playoff.counts.selected).toBe(0);
+    const duringFirst = buildSnapshots(source, {}, "2024-09-01T12:00:00.000Z");
+    expect(duringFirst.map(snapshot => snapshot.kind)).toEqual(["partial"]);
+    expect(duringFirst[0]?.week).toBe(1);
+    expect(duringFirst[0]?.includedGameIds).toEqual([]);
+    expect(duringFirst[0]?.coverage).toContain("Partial-week results omitted: historical completion observations unavailable");
+    expect(duringFirst[0]?.pollReleaseId).toBeNull();
+    db.exec("UPDATE games SET home_score = 50, away_score = 0 WHERE game_id = 2");
+    metadata["2"] = { ...metadata["2"]!, completed: true, status: "completed" };
+    const later = readSeason(db, 2024, metadata);
+    const middle = buildSnapshots(later, {}, "2024-09-08T12:00:00.000Z");
+    expect(middle.map(snapshot => snapshot.kind)).toEqual(["week_final", "partial"]);
+    expect(middle.at(-1)?.week).toBe(2);
+    expect(middle.at(-1)?.includedGameIds).toEqual(["1"]);
+    expect(middle.at(-1)?.pollReleaseId).toBe("ap1");
+    const calendar = { freezeUtc: "2024-09-09T00:00:00.000Z", firstCcgUtc: "2024-09-15T00:00:00.000Z", verified: true };
+    expect(buildSnapshots(later, calendar, "2024-09-10T00:00:00.000Z").some(snapshot => snapshot.kind === "selection_final")).toBe(false);
+    later.pollTiming = { cfp2: { reviewedBy: "fixture-reviewer", source: "fixture-source", reviewedAtUtc: "2024-09-16T00:00:00.000Z",
+      releasedAtUtc: "2024-09-10T00:00:00.000Z", pollFingerprint: pollFingerprint(later.polls.find(poll => poll.release.id === "cfp2")!) } };
+    expect(buildSnapshots(later, calendar, "2024-09-16T00:00:00.000Z").some(snapshot => snapshot.kind === "selection_final")).toBe(true);
+  } finally { db.close(); }
 });

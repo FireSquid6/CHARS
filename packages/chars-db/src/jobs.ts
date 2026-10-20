@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createCfbdClient } from "./cfbd";
-import { ingest } from "./ingest";
+import type { Input } from "./ingest";
+import { digest, ingest } from "./ingest";
 import { openDatabase } from "./database";
 import { buildSnapshots, publishSnapshots } from "./snapshots";
-import { readSeason } from "./repository";
-import type { SourceGameMetadata } from "./repository";
+import { auditedSeason } from "./source";
 
 export function localKey(now = new Date(), timezone = "America/Chicago"): string {
   const parts = new Intl.DateTimeFormat("en-US", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(now);
@@ -30,36 +30,90 @@ async function save(path: string, value: unknown) {
 export async function withLease<T>(cache: string, work: () => Promise<T>): Promise<T> {
   await mkdir(cache, { recursive: true });
   const path = join(cache, "sync.lock"), token = randomUUID();
+  const ownerPath = join(path, "owner");
+  const owner = { token, pid: process.pid };
+  async function isOwner() {
+    const current = await load<{ token?: string } | null>(ownerPath, null);
+    return current?.token === token;
+  }
   for (let attempt = 0; ; attempt++) {
     try { await mkdir(path); break; }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const age = Date.now() - (await stat(path)).mtimeMs;
       if (age < 3 * 60 * 60 * 1000 || attempt > 0) throw new Error("Another sync owns the lease; stale lease requires operator review");
-      // Rename before removal: never delete a newly acquired lock after a failed rename.
+      const previous = await load<{ pid?: number } | null>(ownerPath, null);
+      if (previous) {
+        if (!Number.isSafeInteger(previous.pid) || previous.pid! < 1) throw new Error("Stale lease owner is invalid; operator review required");
+        try { process.kill(previous.pid!, 0); throw new Error("Lease owner is still alive; refusing to steal a long-running sync"); }
+        catch (e) { if ((e as NodeJS.ErrnoException).code !== "ESRCH") throw e; }
+      }
+      // Reclaim only after the owner process is gone (single-host local filesystem).
       const stale = `${path}.stale.${token}`;
       await rename(path, stale);
       await rm(stale, { recursive: true });
     }
   }
-  try { await writeFile(join(path, "owner"), token); return await work(); }
-  finally { if (await readFile(join(path, "owner"), "utf8").catch(() => "") === token) await rm(path, { recursive: true, force: true }); }
+  let heartbeat: Promise<void> = Promise.resolve(), lost: Error | null = null;
+  try {
+    await writeFile(ownerPath, JSON.stringify(owner), { flag: "wx" });
+    const timer = setInterval(() => {
+      heartbeat = heartbeat.then(async () => {
+        if (!await isOwner()) throw new Error("Sync lease ownership lost");
+        const now = new Date(); await utimes(path, now, now);
+      }).catch(error => { lost = error instanceof Error ? error : new Error("Sync lease heartbeat failed"); });
+    }, 30_000);
+    timer.unref();
+    try {
+      const result = await work();
+      await heartbeat;
+      if (lost) throw lost;
+      if (!await isOwner()) throw new Error("Sync lease ownership lost");
+      return result;
+    } finally { clearInterval(timer); await heartbeat; }
+  } finally { if (await isOwner()) await rm(path, { recursive: true, force: true }); }
 }
 
-export async function syncSeason(season: number, cache: string): Promise<{ changed: boolean; coverage: string[] }> {
-  const client = createCfbdClient();
+export async function syncSeason(season: number, cache: string, options: {
+  client?: { season(year: number): Promise<Input> };
+  databasePath?: string;
+  now?: Date;
+} = {}): Promise<{ changed: boolean; coverage: string[] }> {
+  const now = options.now ?? new Date();
+  if (!Number.isFinite(now.getTime())) throw new Error("Invalid sync time");
+  const zone = process.env.SYNC_TIMEZONE ?? "America/Chicago";
+  const active = season === footballSeason(now, zone);
+  const client = options.client ?? createCfbdClient();
   const input = await client.season(season);
-  const connection = openDatabase();
+  const connection = openDatabase(options.databasePath);
   try {
     const audit = await ingest(connection.sqlite, season, input, cache);
     const changed = audit.material;
-    // Do not replace the previous publication when a classification or timing gap exists.
-    if (!audit.coverage.length && changed) {
-      const metadata = await load<Record<string, SourceGameMetadata>>(join(cache, "source", `${season}-games.json`), {});
-      const snapshots = buildSnapshots(readSeason(connection.sqlite, season, metadata));
+    const blocking = audit.coverage.filter(gap => !active || gap !== "No AP/CFP poll data");
+    if (blocking.length) throw new Error(`Season ${season} has ${blocking.length} source coverage gaps; prior publication retained`);
+    const { source, calendar } = await auditedSeason(connection.sqlite, season, cache);
+    const folder = join(cache, "snapshots", String(season));
+    const calendarHash = digest(calendar);
+    const published = await load<unknown>(join(folder, "current.json"), null);
+    const marker = await load<{ calendarHash: string; asOfDay?: string; weekBoundary?: string } | null>(join(folder, "source-state.json"), null);
+    const asOfDay = active ? localKey(now, zone) : undefined;
+    // In addition to the local-day boundary, detect a week starting or a
+    // week-final cutoff crossing between two manual runs on the same day.
+    const boundaries = active ? [...new Set(source.games.filter(game => game.applicationGameType === "regular" && game.kickoffUtc)
+      .map(game => ({ week: game.week, kickoff: Date.parse(game.kickoffUtc!) }))
+      .filter(game => game.week !== null))] : [];
+    const starts = new Map<number, number>();
+    for (const { week, kickoff } of boundaries) starts.set(week!, Math.min(starts.get(week!) ?? Infinity, kickoff));
+    const ordered = [...starts.values()].sort((a, b) => a - b);
+    const weekEdges = ordered.flatMap((start, index) => [start, ordered[index + 1] ?? Math.max(start, ...boundaries.filter(game => starts.get(game.week!) === start).map(game => game.kickoff)) + 7 * 86400000]);
+    for (const cutoff of [calendar.freezeUtc, calendar.firstCcgUtc]) if (cutoff) weekEdges.push(Date.parse(cutoff));
+    const weekBoundary = active ? String(Math.max(0, ...weekEdges.filter(edge => edge <= now.getTime()))) : undefined;
+    // A failed publication can leave a manifest but not the marker; rebuild in that case.
+    if (changed || published === null || marker?.calendarHash !== calendarHash || marker?.asOfDay !== asOfDay || marker?.weekBoundary !== weekBoundary) {
+      const snapshots = active ? buildSnapshots(source, calendar, now.toISOString()) : buildSnapshots(source, calendar);
       await publishSnapshots(join(cache, "snapshots"), season, snapshots);
+      await save(join(folder, "source-state.json"), { calendarHash, asOfDay, weekBoundary });
     }
-    if (audit.coverage.length) throw new Error(`Season ${season} has ${audit.coverage.length} source coverage gaps; prior publication retained`);
     return { changed, coverage: audit.coverage };
   } finally { connection.close(); }
 }

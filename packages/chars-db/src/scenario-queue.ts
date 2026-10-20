@@ -1,14 +1,14 @@
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { readPublished } from "./snapshots";
-import { readScenarioResult, solveSnapshot } from "./scenarios";
+import { readScenarioResult, scenarioCoverageReady, solveSnapshot } from "./scenarios";
 
 const root = join(process.env.CHARS_CACHE_PATH ?? ".cache", "snapshots");
 const years = (await readdir(root)).filter(value => /^\d{4}$/.test(value)).sort().reverse();
 for (const year of years) {
   const snapshots = await readPublished(root, Number(year));
   for (const snapshot of [...snapshots].reverse()) {
-    if (snapshot.kind === "selection_final" || snapshot.coverage.length) continue;
+    if (snapshot.kind === "selection_final" || !scenarioCoverageReady(snapshot.coverage)) continue;
     const previous = await readScenarioResult(snapshot);
     if (previous?.complete || previous?.unsupportedReason || (previous && !previous.checkpoint)) continue;
     const result = await solveSnapshot(snapshot.key, {

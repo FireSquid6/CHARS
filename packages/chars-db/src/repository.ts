@@ -21,6 +21,17 @@ export interface SeasonSource {
   games: Game[];
   polls: { release: PollRelease; entries: PollEntry[] }[];
   coverage: string[];
+  pollTiming?: Record<string, PollTimingEvidence>;
+}
+
+/** Independently reviewed publication evidence, never generated from the CFBD calendar bound. */
+export interface PollTimingEvidence {
+  reviewedBy: string;
+  reviewedAtUtc: string;
+  source: string;
+  pollFingerprint: string;
+  releasedAtUtc?: string;
+  interval?: { earliestUtc: string; latestUtc: string };
 }
 
 /** A read-only typed projection of the existing schema. Never infers a final from a score of 0-0. */
