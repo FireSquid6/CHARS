@@ -2,18 +2,18 @@
 
 ## Objective and scope
 
-Build a Next.js website in TypeScript, using Bun and SQLite, around a deterministic, auditable selection and seeding engine for a hypothetical FBS playoff. Calculate Colley ratings internally from stored game results. Apply AP/CFP top-ups, a regular-season winning-percentage floor, and clean head-to-head overrides across selection boundaries and in seeding.
+Build a Next.js website in TypeScript, using Bun and an existing, externally managed SQLite database, around a deterministic, auditable selection and seeding engine for a hypothetical FBS playoff. Calculate Colley ratings internally from stored game results. Apply AP/CFP top-ups, a regular-season winning-percentage floor, and clean head-to-head overrides across selection boundaries and in seeding.
 
-Support every season from 1998 through the current season, including the ongoing season (2026 when this handoff was updated); derive the current season dynamically, not from a hardcoded end year. Add older seasons only as a separately configured expansion. Implement the website, engine, persistent ingestion, daily job, structured results, and tests. Website brackets are in scope; PDF/booklet generation is not a deliverable. Do not use team logos anywhere.
+Support navigation for every season from 1998 through the current season, including the ongoing season (2026 when this handoff was updated); derive the current season dynamically, not from a hardcoded end year. Database coverage may be narrower: list unsupported or missing years with an explicit data-incomplete state rather than removing them or fabricating results. Add older seasons only as a separately configured expansion. Implement the website, engine, structured results, and tests. Website brackets are in scope; PDF/booklet generation is not a deliverable. Do not use team logos anywhere.
 
-This Markdown file is the complete handoff to an agent starting in a fresh workspace. No source code, database, data exports, reports, prior conversations, or other attachments will be supplied. Scaffold the project and acquire inputs from the documented API. The only required external credential is a valid CFBD API key supplied by the operator; implement a clear setup/error state when it is absent.
+This Markdown file describes the product and policy requirements. The existing repository contains the database contract in `packages/chars-db/src/schema.ts` and an example read path in `site/lib/archive.ts`; use them rather than inventing a second schema. An operator supplies a path to an existing SQLite database through required `DATABASE_PATH`. Database creation, population, correction, backup, and maintenance are external responsibilities, not deliverables of this app. A fresh checkout need not contain a database file or a current-season fixture. Missing configuration, tables, seasons, games, or required poll releases must produce clear setup/incomplete states, never apparently final results or proved mathematical status labels.
 
 ## Website product requirements
 
 | Route/view | Required behavior |
 | --- | --- |
 | `/` | List every supported season, newest first, including the current one even before its first game. Each season links to its own page and shows preseason/current/final/data-incomplete state. |
-| `/seasons/[year]` | Default to the final selection snapshot for a finished selection season, or the latest computed snapshot for the current season. Show its full FBS rankings, playoff cutoffs, selection categories, and record/rating information. |
+| `/seasons/[year]` | Default to the verified final selection snapshot for a finished selection season, or the latest validated snapshot for the current season. When the supplied data does not support one, show an explicit setup/incomplete view instead of a fabricated result. Otherwise show full FBS rankings, playoff cutoffs, selection categories, and record/rating information. |
 | `/seasons/[year]?week=[snapshotKey]` | A shareable historical weekly view. Controls at the top include a week selector, previous/next week, and return-to-latest/final. Preserve the selected week on refresh and browser back/forward. |
 | Final season view | Show the hypothetical playoff bracket, including `Team A / Team B` play-in alternatives, pairing/byes, and seeds. Do not fill hypothetical games with real-world postseason winners. |
 | Non-final weekly view | Show the four status bubbles defined below: Eliminated, Needs help, Controls destiny, Clinched. Include counts and clickable filters, plus a status badge on each team row. |
@@ -29,55 +29,33 @@ Distinguish **current/provisional selection** from **end-of-season mathematical 
 ## Technical architecture
 
 - Next.js App Router, strict TypeScript, Bun as package manager/runtime/test runner, a committed Bun lockfile, and pinned compatible stable dependency versions. Use double quotes in TypeScript.
-- Server-render season lists and ranking data. Use client components for week controls, filters, and interactive bracket details. Keep data access and credentials server-only.
-- Use SQLite through `bun:sqlite` behind a typed repository layer, SQL migrations, foreign keys, prepared statements, transactions, WAL, and a configurable busy timeout. An ORM is optional, not required.
-- Run Next.js and the scheduled worker on a persistent Bun-capable host/container with durable storage for the SQLite database. Keep computation outside request rendering; do not assume an ephemeral serverless filesystem is durable or that an Edge runtime provides Bun APIs.
-- The web process and worker share one database on the same host/volume. Begin with one writer and bounded readers. Do not run independent writable SQLite copies behind multiple application replicas.
-- Separate pure modules for `colley`, `eligibility`, `selection`, `head-to-head`, `seeding`, `brackets`, and `scenarios`, with separate CFBD adapters, repositories, jobs, and UI components. A scenario must invoke the same selection engine used by a real snapshot.
-- Publish a completed snapshot and its results atomically; readers must not see half-rebuilt rankings. Cache by snapshot/data/policy/model revision and invalidate affected season views after publication. Show last successful sync and stale/pending/incomplete states separately from team status.
-- Provide commands equivalent to `bun run db:migrate`, `bun run data:backfill --from 1998 --to CURRENT`, `bun run data:sync`, `bun run snapshots:rebuild --season YEAR`, `bun run scenarios:solve --snapshot KEY`, `bun test`, and the Next.js development/build/start scripts.
+- Server-render season lists and ranking data. Use client components for week controls, filters, and interactive bracket details. Keep database access and its configured path server-only.
+- Use `bun:sqlite` behind a typed, read-only repository layer against the supplied `DATABASE_PATH`. Validate the required tables and columns before computing. Use parameterized queries and a consistent read view of the external database; do not write to it, run migrations, or assume ownership of its WAL, transactions, or maintenance.
+- Run Next.js on a Bun-capable host with access to the operator-supplied SQLite path. Keep expensive scenario computation outside request rendering; do not assume an Edge runtime provides Bun APIs. If caching derived results, use a separate ignored `.cache/` directory, not tables in the source database.
+- Separate pure modules for `colley`, `eligibility`, `selection`, `head-to-head`, `seeding`, `brackets`, and `scenarios`, with a read-only repository, computation jobs if needed, and UI components. A scenario must invoke the same selection engine used by a real snapshot.
+- Publish only complete computed results. Optional JSON snapshot/scenario caches can use atomic file replacement and manifests keyed by source-data revision (or validated content hash), snapshot cutoffs, policy and model versions. Detect external DB changes and refresh affected results; alternatively, an independently scheduled computation job may refresh the cache. Neither mechanism may manage or write the database. Show cache age, pending computation, and data incompleteness separately from team status; never present stale results as current.
+- Provide commands equivalent to `bun run snapshots:rebuild --season YEAR`, `bun run scenarios:solve --snapshot KEY`, `bun test`, and Next.js development/build/start scripts. These commands read the supplied database and write only optional derived sidecar outputs.
 
-These are application deployment requirements. Implement the daily job in the deployed project; do not create a ChatGPT reminder or automation as a substitute.
+## Supplied SQLite data contract and coverage
 
-## CollegeFootballData ingestion and daily job
+The application reads the operator's existing SQLite file; it does not create, migrate, seed, correct, or manage it. `packages/chars-db/src/schema.ts` defines the current contract, and `site/lib/archive.ts` shows the existing `DATABASE_PATH`-based read pattern. At minimum, validate these tables and columns before serving computed results:
 
-Use [CFBD getting started](https://api.collegefootballdata.com/getting-started), the [games reference](https://api.collegefootballdata.com/api/games), and the [rankings reference](https://api.collegefootballdata.com/api/rankings). Store the API key in a server-side `CFBD_API_KEY` environment variable and send bearer authentication. Do not expose it through `NEXT_PUBLIC_*`, client code, URLs, or logs.
-
-Use season-wide `/games?year=YEAR` queries with explicit season-type/classification parameters as appropriate, plus season-specific team membership and poll data. Validate the current response schema in the adapter rather than copying assumed field names. Store schedules as well as completed results: future fixtures are necessary for status proofs. Avoid filtering out games against FCS opponents during ingestion. Keep provider season type separate from the application's explicit CCG/bowl/regular classification; a provider's `regular` tag alone is not the selection rule.
-
-1. Backfill historical seasons and current-season schedules, results, FBS membership, polls, and week calendars into SQLite. Historical membership must use that season's classification, not today's FBS list.
-2. At **00:00 every day in `America/Chicago`**, launch a durable scheduler job. Store timestamps in UTC; configure the scheduler with the IANA timezone rather than a fixed UTC offset. Make timezone configurable while keeping this default explicit.
-3. Fetch the complete active-season schedule/results and polls, including unresolved older games. Upsert by stable provider game ID: add new games, update final scores/completion flags, reschedules and cancellations, and corrected results. This is not an append-only importer. Reconcile recent completed seasons on a lower-frequency pass to catch corrections without re-downloading every historical year daily.
-4. Validate the response before committing. Record raw payload/hash, fetch time, source identity, inserts/updates, and failures. Do not infer cancellation from one missing row, overwrite valid data with an empty failed response, or record an unfinished 0–0 game as a tie.
-5. Detect material changes and rebuild affected weekly snapshots from the earliest affected game/week onward; recompute their ratings, selections, brackets, and scenario work. A poll or classification correction can also invalidate snapshots. Do nothing expensive for an unchanged payload.
-6. Use a database-backed lease/unique scheduled-run key to prevent overlapping writers and duplicate daily runs. Retry transient failures with bounded backoff, respect provider quotas, and keep the previous successful snapshot available on failure. A restarted worker must recover unfinished work. Recheck currently unfinished games on the next run; games ending after midnight are picked up later.
-7. Publish successful revisions atomically and invalidate the relevant Next.js cache. Run heavy scenario work through a resumable background queue; a delayed scenario job must not prevent publishing validated rankings.
-
-The scheduler must live outside the Next.js request lifecycle; no browser-triggered or process-local `setInterval` as the sole scheduler. Provide deployment configuration, a manual retry command, health/last-run inspection, and a SQLite-consistent backup/restore procedure that accounts for WAL. Do not hold a write transaction during network requests or long scenario searches.
-
-CFBD documents varying historical coverage and corrections. Validate completeness per season; missing poll or schedule data is a data gap, not proof of elimination. Before CFP releases begin in a season, use the latest available AP poll for provisional weekly top-ups, label the fallback, and switch to CFP when the corresponding release is available. This early-season AP fallback is a new display-policy default; final 2014+ selection still uses the pre-CCG CFP release. Never use a later release just because an API parameter offers `latest` or `final`.
-
-## SQLite data model
-
-Implement migrations with at least these logical tables; equivalent normalization is acceptable.
-
-| Table | Important fields and constraints |
+| Existing table | Read-only meaning |
 | --- | --- |
-| `seasons` | `year` PK, state, selection freeze, calendar policy, coverage/completeness metadata. |
-| `teams`, `team_aliases`, `team_seasons` | Stable internal/provider IDs; unique alias mappings; season-scoped FBS/FCS classification and conference. No logo fields are needed. |
-| `games` | Provider game ID unique, season/week, home/away IDs, kickoff UTC, nullable scores, completed/status, provider season type, application game type, classification provenance, first/last seen, payload hash. Check different opponents and valid score/completion combinations. |
-| `game_revisions` / `ingestion_payloads` | Source payload or immutable reference, hash, observed time, and previous normalized values. Support score/schedule correction auditing. |
-| `poll_releases`, `poll_entries` | Season, poll type, associated game-week, release/effective timestamp, source hash; release/team unique, rank and ties retained. Store actual entries even when the hypothetical voter rule rejects them. |
-| `snapshots`, `snapshot_games` | Snapshot key, game cutoff and poll cutoff, partial/week-final/selection-final flag, revision, selected poll release, input hash, policy/model versions, coverage; explicit included-game IDs and result revisions. |
-| `snapshot_rankings`, `selection_events`, `bracket_slots` | Snapshot/team unique; records, rating precision/error metadata, raw/adjusted ranks, eligibility, original route, final category; ordered swaps, pair alternatives and seeds. |
-| `scenario_jobs`, `scenario_statuses`, `scenario_witnesses` | Snapshot/team/poll-model keys, pending/running/proved/unsupported state, proved label, assumptions, solver version, runtime/proof metadata, example qualifying/failing completions and help conditions. |
-| `sync_runs`, `job_leases`, `schema_migrations` | Scheduled key/run ID, UTC start/end, success/failure and counts; exclusive lease/expiry; migration versions. |
+| `teams` | `team_id` (stable identity), `team_name`, `abbreviation`. |
+| `conferences` | `conference_id`, `name`, `abbreviation`. |
+| `seasons` | One team/year membership: `team_id`, `year`, `conference_id`, `division`, `classification` (`FBS`, `FCS`, `DIV2`, `DIV3`). This is not a year-level season status table. |
+| `games` | Regular-season games only: integer `game_id`, `home_team`, `away_team`, `year`, `week`, `start_date` (timestamp in milliseconds), nullable `home_score`, `away_score`, `overtimes`. Both scores present indicate a recorded result; both null indicate an unscored fixture. Equal recorded scores indicate a tie. Validate inconsistent partial scores rather than guessing. |
+| `poll_releases` | `release_id`, `poll_id`, `year`, `week`, `released_at` (timestamp in milliseconds). Use actual release time and poll identity, not week number alone. |
+| `poll_entries` | `release_id`, `team_id`, `rank`; preserve ties and filter ineligible teams only when selecting. |
 
-Index games by `(season, week)`, `(season, application_game_type, completed)`, and both team/season combinations; index poll lookup and snapshots by season/cutoff and statuses by snapshot/team. Include revision/model/policy identity in derived-result uniqueness. Store raw source revisions without fabricating historical knowledge: a retrospective weekly reconstruction uses results known by that game cutoff, but is not necessarily an archive of what the API itself reported on that date.
+Use season-specific `seasons.classification` for the FBS rating universe and to count FBS-vs-FCS results in eligibility. Stable team IDs connect games, memberships, and poll entries; never identify teams by abbreviated names alone. A regular-season-only `games` table cannot locate the first conference championship from its own rows. Supply a verified, versioned selection-calendar sidecar (including the pre-CCG freeze and week boundaries) where necessary; it is policy/metadata, not a substitute for missing primary game or poll rows. The operator must provide or verify season/week schedule-coverage evidence when completeness cannot be established from the database itself; a sidecar may record that attestation and its provenance but cannot invent games. Do not infer a season is complete merely because rows or games exist. The data contract has no explicit completed/cancelled game status, classification provenance, game observation history, or score correction timestamps; kickoff and poll-release times do not prove when a game result became known. Treat ambiguous unscored or missing fixtures, calendar uncertainty, inconsistent memberships, and absent required releases as coverage gaps. Without independently verified completeness, do not publish a final bracket or mathematical status label as proved.
+
+For retrospective weekly views, use the declared regular-season week and cutoff convention plus only the included results in that window; disclose that such reconstruction is not a historical as-of publication archive. Do not claim an exact historical partial-week state when observation times are unavailable. The external data owner supplies schedule completeness, classifications, and polls; show missing coverage explicitly, including for years that appear in the navigation but not in the database. Before CFP releases begin in a season, use the latest available AP poll for provisional weekly top-ups, label the fallback, and switch to CFP when the corresponding release is available. This early-season AP fallback is a display-policy default; final 2014+ selection still uses the pre-CCG CFP release. Never use a later release as a replacement for a missing required one.
 
 ## Calculate Colley ratings internally
 
-The website's authoritative `colleyRating` and `colleyRank` are computed from normalized included games. Do not scrape published Colley tables as runtime inputs or scenario shortcuts. Do not use CFBD's Elo/SRS/SP ratings as Colley inputs.
+The website's authoritative `colleyRating` and `colleyRank` are computed from included games in the supplied database. Do not scrape published Colley tables as runtime inputs or scenario shortcuts. Do not substitute externally computed Elo/SRS/SP ratings for Colley inputs.
 
 For a declared rating universe, let `n_i` count included games, `n_ij` count meetings, and `w_i`, `l_i` count decisive wins/losses within that same universe. Build and solve:
 
@@ -113,7 +91,7 @@ Current .750 failure, an unfavorable current rating, or not appearing in a poll 
 
 ### Future polls and the voter eligibility rule
 
-**It is illegal for hypothetical voters to vote a team below final .750 into this playoff field.** An 8–4 team cannot be a poll addition. This is not an exception for an attractive record or a way to force twelve participants. Preserve actual historical polls in storage but skip their ineligible entries for hypothetical selection; never rewrite the source poll. The final field can contain fewer than twelve teams.
+**It is illegal for hypothetical voters to vote a team below final .750 into this playoff field.** An 8–4 team cannot be a poll addition. This is not an exception for an attractive record or a way to force twelve participants. Read actual historical poll entries unchanged from the supplied database but skip their ineligible entries for hypothetical selection; never rewrite the source poll. The final field can contain fewer than twelve teams.
 
 Game results alone do not determine future AP/CFP rankings. Use this explicit, conservative default for mathematical status: quantify over every permitted ordering/subset of terminal **eligible** teams for the applicable poll, with up to 25 distinct teams, filled to `min(25, eligibleTeamCount)` for the scenario model. This models the adapted eligible-voter rule, not a prediction of actual voters. Poll top-ups cannot introduce an ineligible team. Real published releases can still contain ineligible teams; filtering them at a realized snapshot can leave fewer available entries than this future-poll model assumed. Record that distinction and scope every proof to its declared poll model.
 
@@ -123,35 +101,34 @@ Show `all eligible poll orders` with each result. Offer a separate frozen-curren
 
 Find or rule out witnesses for: any qualifying completion, any failing completion, a qualifying win-out completion, and a failing win-out completion. Clinched/Eliminated/Controls destiny require an exhaustive proof or sound bounds/solver certificate; Monte Carlo results, sampled schedules, or a timeout cannot establish them.
 
-Store qualifying and failing witnesses and let a team detail panel show one possible path, required wins, and poll assumptions. If displaying a compact help condition such as “win out AND B beats C,” verify its claimed sufficiency over all unspecified allowed outcomes. Label a witness “one possible path,” not a necessary or sufficient condition for every scenario unless proved. Support alternative paths and avoid representing an OR of paths as one AND list.
+Retain qualifying and failing witnesses in derived results and let a team detail panel show one possible path, required wins, and poll assumptions. If displaying a compact help condition such as “win out AND B beats C,” verify its claimed sufficiency over all unspecified allowed outcomes. Label a witness “one possible path,” not a necessary or sufficient condition for every scenario unless proved. Support alternative paths and avoid representing an OR of paths as one AND list.
 
 There is a potential four-label coverage issue: head-to-head swaps, cycles, and voter behavior have not been proved monotone in a team's own wins. If a qualifying completion exists but no qualifying win-out completion exists, none of the four user definitions applies. Detect this explicitly as a policy/model exception for review; do not falsely call the team Eliminated or silently redefine Needs help. A pending, incomplete, or unsupported computation is a data/computation state, not a fifth playoff status. Show the four bubbles while clearly disclosing any teams not yet proved/classifiable, rather than forcing every team into a false label.
 
 Avoid naive full enumeration for an entire early season. Use exact record pruning, sound interval bounds on ratings and selection, branch-and-bound, constraint solving, memoized shared states, and cached witnesses. For a fixed remaining FBS schedule, the terminal Colley matrix is constant and its right-hand side varies with outcomes: reuse its factorization and derive outcome coefficients/bounds. Account for correlated opponent outcomes, changing head-to-head SCCs, and uncertain poll top-ups; a bound on one rating alone is not a full selection proof. Solve in Bun workers/background jobs and cache by complete input/schedule/policy/poll-model hash.
 
-Set explicit CPU/memory budgets and persist resumable work. A budget exhaustion yields pending/unproved, never a guessed mathematical label. Benchmark exact small fixtures against exhaustive enumeration and the target historical/current weekly scope against realistic schedules. Do not declare the feature complete if the intended weekly classifications cannot be computed; report the remaining computational/policy limitation.
+Set explicit CPU/memory budgets and optionally persist resumable work in ignored derived sidecar files. A budget exhaustion yields pending/unproved, never a guessed mathematical label. Benchmark exact small fixtures against exhaustive enumeration and the target historical/current weekly scope against realistic schedules. Do not declare the feature complete if the intended weekly classifications cannot be computed; report the remaining computational/policy limitation.
 
 ## Website and infrastructure acceptance tests
 
-- Home includes every configured year through the current season, with working season links, preseason handling, and no hardcoded 2025 endpoint.
-- Default completed-season view is the pre-CCG final snapshot and bracket; current-season view is the latest validated snapshot. Week controls are at the top and URL/history state works.
+- Home includes every configured year from 1998 through the current season regardless of supplied database coverage, with working season links, preseason/incomplete handling, and no hardcoded 2025 endpoint.
+- Default completed-season view is the pre-CCG final snapshot and bracket only when complete, otherwise an explicit incomplete state; current-season view is the latest validated snapshot when available. Week controls are at the top and URL/history state works.
 - Non-final views, including historical weeks, show four named bubbles with counts/filtering, per-team status details, and distinct computation/data states. Final views show final selections rather than future-status claims.
 - Rating/selection boundaries, .750 exclusions, head-to-head explanations, and shortened fields are visible. A poll containing an 8–4 team cannot admit that team, including when the field otherwise stays below twelve.
 - No team-logo files, imported logo components, logo URLs, or external image requests appear in rendered pages.
-- All ratings are computed internally; numerical fixtures and exact threshold tests pass. Reordering ingested games or teams does not change results.
-- The midnight scheduler uses `America/Chicago`, including offset changes, runs without site traffic, recovers after restart, prevents overlap, and supports manual replay. Repeating an ingestion payload does not duplicate games.
-- Correcting a score, moving a kickoff/week, changing classification, receiving a late completion, or correcting a poll invalidates exactly the dependent revisions; failure leaves a coherent prior snapshot available.
+- All ratings are computed internally; numerical fixtures and exact threshold tests pass. Reordering input games or teams does not change results.
+- Missing `DATABASE_PATH`, an inaccessible file, or absent required tables/columns produces a clear setup state. Missing years, unverified schedules, or required poll releases produce explicit data-incomplete states without fabricated final brackets or proved status labels. No database write is attempted by the app.
+- External score, kickoff/week, classification, fixture, and poll changes invalidate dependent derived revisions; cache publication is atomic. A failed refresh does not relabel old results as current or conceal a coverage gap.
 - Weekly reconstruction cannot read later completed results or a later poll. Early-season AP fallback and poll publication timing are explicit. Missing data never appears as a proved Eliminated label.
 - Small scenario fixtures cover each quantified label, poll-dependent qualification, an ineligible current record that can recover, win-out insufficiency, the four-label coverage exception, shared-game consistency, and solver timeout.
-- Browser assets contain no API key. Public requests use SQLite/computed outputs, not fresh CFBD fetches or exponential scenario searches. Test migrations, transaction atomicity, backup/restore, responsive layout, and keyboard interactions.
+- Browser assets contain no server-only database path or private data. Public requests use read-only SQLite access/computed outputs, not exponential scenario searches. Test read-only behavior, missing-schema/coverage states, optional atomic cache publication, responsive layout, and keyboard interactions.
 
 ## Source references and decisions to retain
 
-Documentation checked October 19, 2026. The implementation agent must validate the live API schema and pin compatible dependency versions at build time.
+Document the existing database contract in `packages/chars-db/src/schema.ts`, validate its required shape at runtime, and pin compatible dependency versions at build time.
 
-- [CFBD getting started](https://api.collegefootballdata.com/getting-started), [games](https://api.collegefootballdata.com/api/games), [rankings](https://api.collegefootballdata.com/api/rankings), [availability](https://api.collegefootballdata.com/data-availability), and [usage/access](https://api.collegefootballdata.com/usage-and-access).
 - [Colley's original matrix-method paper](https://www.colleyrankings.com/matrate.pdf) and [FCS-group extension](https://colleyrankings.com/iaagroups.html). The selected FBS-only default and published grouped rankings are different model configurations.
-- [Next.js with Bun](https://bun.sh/guides/ecosystem/nextjs), [Bun SQLite](https://bun.sh/docs/runtime/sqlite), and [Next.js self-hosting](https://nextjs.org/docs/app/guides/self-hosting).
+- [Next.js with Bun](https://bun.sh/guides/ecosystem/nextjs), [Bun SQLite](https://bun.sh/docs/runtime/sqlite), and [Next.js self-hosting](https://nextjs.org/docs/app/guides/self-hosting). Repository references: `packages/chars-db/src/schema.ts` and `site/lib/archive.ts`.
 
 Keep policy defaults visible: cycle scope, outsider admission path, FCS rating treatment, odd play-in byes, fixed winner slots, and future-poll/scenario assumptions. All selection and seeding rules are specified in the following sections.
 
@@ -199,7 +176,7 @@ Exclude conference championship games, bowls, and playoff games. Use the poll re
 
 **Selection-calendar default:** freeze after the last full regular-season weekend before the first FBS conference championship game. Exclude late regular-season games during championship week as well as CCGs themselves. This allows the hypothetical play-ins to occupy CCG week. Configure and disclose the per-season cutoff rather than assuming a universal week number. A mode including later regular-season finales is a different calendar policy and must not be mixed into this default.
 
-Use CFBD calendar data where available, deriving and validating older calendars from games when necessary. Week controls must represent the actual calendar, including Week 0, postponements, partial weeks and a final-selection option. Include only completed games belonging to the chosen snapshot, never later results or scheduled-game placeholder scores. A poll associated with those results may be released later; store its release/cutoff separately and ensure the snapshot does not read beyond that declared publication window. If exact historical completion/release timestamps are unavailable, document the weekly reconstruction convention rather than inventing timestamps.
+Use verified calendar metadata supplied alongside the external database where the regular-season game rows do not establish a cutoff; validate older calendars against known games without treating inferred boundaries as verified. Week controls must represent the actual calendar, including Week 0, postponements, partial weeks and a final-selection option. Include only scored games belonging to the chosen snapshot, never later results or scheduled-game placeholder scores. A poll associated with those results may be released later; record its release/cutoff separately and ensure the snapshot does not read beyond that declared publication window. The supplied schema has poll-release times but no game-result observation times: document the retrospective weekly reconstruction convention rather than inventing as-of timestamps or claiming exact in-progress partial-week history.
 
 For included games, calculate:
 
@@ -217,13 +194,13 @@ Compute Colley ratings internally as specified above; preserve solver precision 
 
 At minimum, supply:
 
-- Season, cutoff, source URLs/releases, and an explicit game-inclusion convention.
-- All FBS team IDs, display names, computed Colley rank, and unrounded internally calculated rating with model/precision metadata.
-- Included regular-season games with stable game ID, date, team IDs, result, and game type. Preserve individual opponent identities; an aggregate FCS row cannot establish head-to-head results.
-- Per-team snapshot records, reconciled against included games.
-- Contemporaneous AP/CFP positions, including ties and unranked teams.
+- Season, verified cutoff/calendar basis, poll releases, database revision or validated content hash, and an explicit game-inclusion convention.
+- All season-scoped FBS team IDs and display names from the supplied tables; derive Colley rank and unrounded rating internally with model/precision metadata.
+- Included regular-season games with stable game ID, date/week, team IDs, and nullable scores. The existing table contains only regular-season games; use verified calendar metadata to decide which ones fall before the selection freeze. Preserve individual opponent identities; an aggregate FCS row cannot establish head-to-head results.
+- Per-team snapshot records computed and reconciled against included games.
+- Contemporaneous AP/CFP releases and ranked positions, including ties; treat absent entries as unranked rather than requiring rows for them.
 
-Use stable IDs internally, with explicit aliases for names such as USC/Southern California and Miami (FL)/Miami (OH). Never join on an ambiguous shortened name. Missing head-to-head data means unknown, not a confirmed absence of a game. Reject an incomplete season or mark the result incomplete; do not publish an apparently final result from a partial schedule.
+Use stable IDs internally; provide versioned sidecar aliases only when required for display or external metadata, for names such as USC/Southern California and Miami (FL)/Miami (OH). Never join on an ambiguous shortened name. Missing head-to-head data means unknown, not a confirmed absence of a game. Reject an incomplete season or mark the result incomplete; do not publish an apparently final result from a partial schedule.
 
 Define a deterministic `colleyKey` as computed rating descending, then stable team ID ascending for a verified exact tie. Use it to break tied poll positions as well. Preserve raw computed Colley rank independently of adjusted rank and playoff seed. Resolve numerically ambiguous comparisons before applying this key.
 
@@ -374,28 +351,25 @@ Also validate the termination argument on generated small DAGs and validate that
 
 ## Fresh-workspace implementation and delivery
 
-Create the repository from this specification. A suggested structure is:
+Continue the existing repository and use its `packages/chars-db/src/schema.ts` contract and `site/lib/archive.ts` read path. A suggested organization for new application code is:
 
 ```text
 app/page.tsx
 app/seasons/[year]/page.tsx
 components/
 src/domain/{colley,eligibility,selection,head-to-head,seeding,brackets,scenarios}.ts
-src/data/cfbd/
 src/data/repositories/
-src/jobs/
-db/migrations/
+src/computation/
 scripts/
 tests/fixtures/
-deploy/
 .env.example
 README.md
 ```
 
-Create `.env.example` with placeholders and documented defaults for `CFBD_API_KEY`, an absolute SQLite database path, `SYNC_TIMEZONE=America/Chicago`, `START_SEASON=1998`, and scenario computation budgets. Keep actual credentials and database files out of version control. Derive the current football season from provider calendar/season metadata and the configured football calendar, not a naive assumption that a January postseason belongs to the new calendar year's season.
+Document required `DATABASE_PATH` (the operator-supplied absolute path to the existing SQLite file), `START_SEASON=1998`, and scenario computation budgets in `.env.example` and README. Keep the database file and any optional `.cache/` JSON outside version control. Never silently create an empty file at a missing database path. Derive the current football season from a configured football calendar and the present date, not the last year with rows and not a naive assumption that a January postseason belongs to the new calendar year's season. Show the current year even if the operator's database does not yet cover it.
 
-Provide typed contracts for normalized games, polls, snapshot inputs, computed ratings, selection results, swap events, bracket slots and scenario proofs. Validate external data at the ingestion boundary; UI code should consume validated domain results. Include offline synthetic fixtures so the core test suite runs without an API key or network. These fixtures demonstrate correctness and must not be presented as real season results.
+Provide typed contracts for read-only game, membership and poll rows, snapshot inputs, computed ratings, selection results, swap events, bracket slots and scenario proofs. Validate the SQLite contract and data completeness at the read boundary; UI code should consume validated domain results. Include offline synthetic fixtures so the core test suite runs without a database connection or network. These fixtures demonstrate correctness and must not be presented as real season results or assumed to be available as the production database.
 
-Implement in dependency order: project/migrations and source adapters; normalized backfill; Colley and selection engine; weekly snapshots and rankings UI; hypothetical bracket UI; exact scenario/status engine; scheduled ingestion/deployment. Make the mathematical status engine a tracked deliverable, not an unspecified enhancement. Clearly report a missing credential, coverage issue, unresolved model exception, or unproved status rather than substituting fabricated data or a heuristic label.
+Implement in dependency order: read-only SQLite connection and setup/coverage validation; Colley and selection engine; verified calendar/poll snapshot construction and rankings UI; hypothetical bracket UI; exact scenario/status engine; optional derived-result caching/recomputation. Make the mathematical status engine a tracked deliverable, not an unspecified enhancement. Clearly report missing database configuration, missing required tables or poll releases, coverage issues, unresolved model exceptions, or unproved status rather than substituting fabricated data or a heuristic label.
 
-Deliver the Next.js/TypeScript/Bun project, SQLite migrations, reproducible CFBD backfill, persistent daily scheduler configuration, engine and browser tests, and a README covering local setup, API credentials, deployment, timezone, database backup/restore, policy defaults, and computational limits. Pin policy/model versions, retain source provenance, and expose Bun commands for one season or a range. No code, dataset, or other attachment beyond this Markdown file may be assumed.
+Deliver the Next.js/TypeScript/Bun app, read-only integration with the existing externally managed SQLite contract, engine and browser tests, and a README covering local setup with `DATABASE_PATH`, deployment, coverage validation, optional derived-result cache refresh, policy defaults, and computational limits. Pin policy/model versions, retain database-input and calendar provenance, and expose Bun computation commands for one season or a range. Do not assume a checked-in database file, data export, current-season fixture, or independent management of the operator's SQLite database.
