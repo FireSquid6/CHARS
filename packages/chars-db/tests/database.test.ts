@@ -35,7 +35,7 @@ test("migrations are repeatable and every inventory table exists", async () => {
   const { db } = await setup();
   try {
     await migrate(db);
-    expect(db.query("SELECT version FROM schema_migrations").all()).toHaveLength(7);
+    expect(db.query("SELECT version FROM schema_migrations").all()).toHaveLength(8);
     const names = db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'").all().map(row => row.name);
     for (const name of ["seasons", "teams", "team_aliases", "team_seasons", "games", "game_revisions", "ingestion_payloads", "poll_releases", "poll_entries", "snapshots", "snapshot_games", "snapshot_rankings", "selection_events", "bracket_slots", "scenario_jobs", "scenario_statuses", "scenario_witnesses", "sync_runs", "job_leases", "schema_migrations"]) {
       expect(names).toContain(name);
@@ -73,7 +73,7 @@ test("upgrades a populated, previously migrated 001 database without losing FK-l
     await migrate(upgraded);
     await migrate(upgraded);
     expect(upgraded.query<{ version: string }, []>("SELECT version FROM schema_migrations ORDER BY version").all().map(row => row.version))
-      .toEqual(["001_initial.sql", "002_observations_and_snapshot_integrity.sql", "003_calendar_and_provenance.sql", "004_input_revisions_and_gaps.sql", "005_snapshot_publication.sql", "006_input_generation_and_publication_state.sql", "007_scenario_work.sql"]);
+      .toEqual(["001_initial.sql", "002_observations_and_snapshot_integrity.sql", "003_calendar_and_provenance.sql", "004_input_revisions_and_gaps.sql", "005_snapshot_publication.sql", "006_input_generation_and_publication_state.sql", "007_scenario_work.sql", "008_sync_queue.sql"]);
     expect(upgraded.query("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(upgraded.query<{ payload_id: string }, []>("SELECT payload_id FROM game_revisions WHERE game_id = 'game'").get()?.payload_id).toBe("payload");
     expect(upgraded.query<{ payload_id: string }, []>("SELECT payload_id FROM poll_releases WHERE id = 'poll'").get()?.payload_id).toBe("payload");
@@ -122,7 +122,7 @@ test("two independent processes migrate the same new database without racing ver
   }
   const db = openDatabase({ path });
   try {
-    expect(db.query("SELECT * FROM schema_migrations").all()).toHaveLength(7);
+    expect(db.query("SELECT * FROM schema_migrations").all()).toHaveLength(8);
     expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
   } finally { db.close(); }
 });

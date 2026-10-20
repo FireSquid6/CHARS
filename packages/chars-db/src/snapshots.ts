@@ -14,7 +14,7 @@ type Poll = { id: string; poll_type: "ap" | "cfp"; game_week: number | null;
 export type SnapshotPlan = { key: string; season: number; week: number | null;
   kind: "partial" | "week_final" | "selection_final"; gameCutoff: string; pollCutoff: string | null };
 export type RebuildReport = { published: string[]; unchanged: string[]; incomplete: Array<{ key: string; reasons: string[] }> };
-export type RebuildOptions = { beforePublish?: (plan: SnapshotPlan) => void };
+export type RebuildOptions = { beforePublish?: (plan: SnapshotPlan) => void; fromCutoffUtc?: string };
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const rows = <T>(db: Database, sql: string, ...args: (string | number)[]): T[] => db.query(sql).all(...args) as T[];
 const first = <T>(db: Database, sql: string, ...args: (string | number)[]): T | null => db.query(sql).get(...args) as T | null;
@@ -290,6 +290,11 @@ export function rebuildSnapshots(db: Database, season: number, nowUtc = new Date
     return report;
   }
   for (const plan of plans) {
+    if (options.fromCutoffUtc && plan.gameCutoff < options.fromCutoffUtc && publishedSnapshot(db, plan.key) &&
+      first<{ state: string }>(db, "SELECT state FROM snapshot_publications WHERE snapshot_key=?", plan.key)?.state === "current") {
+      report.unchanged.push(plan.key);
+      continue;
+    }
     let result: { changed: boolean; reasons: string[] };
     try { result = build(db, plan, nowUtc, expectedGeneration, options); }
     catch (error) {

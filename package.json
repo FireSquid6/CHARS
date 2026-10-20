@@ -12,6 +12,8 @@
     "test": "bun test",
     "db:migrate": "bun packages/chars-db/src/migrate.ts",
     "data:backfill": "bun packages/chars-db/src/backfill.ts",
+    "data:sync": "bun packages/chars-db/src/sync.ts",
+    "scenarios:work": "bun packages/chars-db/src/scenario-worker.ts",
     "snapshots:rebuild": "bun packages/chars-db/src/snapshots.ts",
     "scenarios:solve": "bun packages/chars-db/src/scenarios.ts"
   },
