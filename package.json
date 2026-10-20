@@ -16,7 +16,9 @@
     "snapshots:rebuild": "bun packages/chars-db/src/rebuild.ts",
     "data:backfill": "bun packages/chars-db/src/backfill.ts",
     "data:sync": "bun packages/chars-db/src/sync.ts",
-    "data:schedule": "bun packages/chars-db/src/schedule.ts"
+    "data:schedule": "bun packages/chars-db/src/schedule.ts",
+    "scenarios:solve": "bun packages/chars-db/src/scenario-worker.ts",
+    "scenarios:work": "bun packages/chars-db/src/scenario-queue.ts"
   },
   "trustedDependencies": ["sharp", "unrs-resolver"]
 }

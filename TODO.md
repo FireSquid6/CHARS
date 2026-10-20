@@ -27,11 +27,11 @@
 
 ## 4. Exact scenarios and status proofs — computational limitation
 
-- [ ] Implement shared-game terminal completions with fixed known schedule, FCS record bounds, eligible-only all-poll-order model, win-out quantifiers and the four ordered statuses. Reuse the same selection/bracket engine; handle historical ties where permitted.
-- [ ] Detect the four-label coverage exception; retain proofs, qualifying/failing and win-out witnesses, poll-dependent help, and explicit assumptions. Never mislabel an unproved case as eliminated or clinched.
-- [ ] Build a sound resumable solver (pruning, certified bounds or exhaustive proofs, memoization, fixed-matrix factor reuse), keyed by full inputs/policy/poll model with CPU/memory budgets and pending on exhaustion.
+- [x] Implement shared-game terminal completions with fixed known schedule, FCS record bounds, eligible-only all-poll-order model, win-out quantifiers and the four ordered statuses. Reuse the same selection/bracket engine; handle historical ties where permitted.
+- [x] Detect the four-label coverage exception; retain proofs, qualifying/failing and win-out witnesses, poll-dependent help, and explicit assumptions. Never mislabel an unproved case as eliminated or clinched.
+- [ ] Indexed resumable exhaustive solver, signed cache checkpoint and record/eligible-count certificates implemented; general selection-aware pruning, fixed-matrix factor reuse and full-season scalable proof search remain open.
 - [ ] **Computational limitation:** exact weekly classifications across a full early-season FBS schedule and all permitted poll orders are not implemented or benchmarked. Naive enumeration is exponential and cannot justify a mathematical label; this remains a gating product gap until certified and benchmarked at target scale.
-- [ ] Offline fixtures for every label, shared-game consistency, polls, recovery from current .750 failure, four-label exception and timeout; realistic workload benchmarks.
+- [ ] Offline scenarios cover labels, poll dependence, records, shared outcomes, timeout and a bounded search for the coverage exception; no explicit constructible exception fixture yet. Synthetic 134-team/804-game benchmark confirms early-season incompleteness; real historical workloads remain unverified.
 
 ## 5. Durable daily updates and delivery
 

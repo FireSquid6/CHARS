@@ -15,6 +15,8 @@ export type { SelectionInput, SelectedTeam, SelectionSwap, SelectionResult as Fi
 export { seedField } from "./seeding";
 export type { SeedingEdge, SeededTeam, SeedingResult } from "./seeding";
 export { buildBracket, computePlayoff, standardSeedOrder } from "./brackets";
+export { computeScenarios } from "./scenarios";
+export type { ScenarioInput, ScenarioResult, ScenarioCheckpoint } from "./scenarios";
 export type { PlayinPair, MainSlot, MainMatch, BracketEntry, BracketResult } from "./brackets";
 
 export type SeasonState = "preseason" | "current" | "final" | "incomplete";
