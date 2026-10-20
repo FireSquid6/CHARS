@@ -5,6 +5,7 @@ import { useState } from "react";
 import type { SnapshotArtifact } from "../../../../packages/chars-db/src/snapshots";
 import type { TeamIdentity } from "../../../lib/playoff";
 import type { ScenarioProof, ScenarioLabel } from "../../../../packages/chars-algorithm/src/index";
+import { teamHref } from "../../../lib/season-links";
 
 type Ranking = SnapshotArtifact["playoff"]["seeding"]["rankings"][number];
 
@@ -13,7 +14,7 @@ const labels: { label: ScenarioLabel; text: string }[] = [
   { label: "controls_destiny", text: "Controls destiny" }, { label: "clinched", text: "Clinched" }
 ];
 
-export function Rankings({ year, rows, identities, final, proofs, incomplete }: { year: number; rows: Ranking[]; identities: Record<string, TeamIdentity>; final: boolean; proofs: ScenarioProof[]; incomplete: boolean }) {
+export function Rankings({ year, week, rows, identities, final, proofs, incomplete }: { year: number; week: string; rows: Ranking[]; identities: Record<string, TeamIdentity>; final: boolean; proofs: ScenarioProof[]; incomplete: boolean }) {
   const [all, setAll] = useState(false);
   const [search, setSearch] = useState("");
   const [bubble, setBubble] = useState<ScenarioLabel | null>(null);
@@ -33,7 +34,7 @@ export function Rankings({ year, rows, identities, final, proofs, incomplete }: 
     <div className="table-scroll"><table><caption className="sr-only">FBS Colley rankings and hypothetical playoff selection</caption><thead><tr><th scope="col">Colley #</th><th scope="col">Team</th><th scope="col">Record / pct</th><th scope="col">Rating</th><th scope="col">Adjusted #</th><th scope="col">Initial route</th><th scope="col">Final category</th>{!final && <th scope="col">Scenario status</th>}</tr></thead><tbody>
       {visible.map(row => { const name = identities[row.teamId]?.teamName ?? row.teamId;
         const record = row.record;
-        return <tr key={row.teamId}><td>{row.colleyRank}</td><th scope="row"><Link className="primary-link" href={`/seasons/${year}/teams/${encodeURIComponent(row.teamId)}`}>{name}</Link><span className="subtext">{identities[row.teamId]?.abbreviation ?? row.teamId}{identities[row.teamId]?.conference ? ` · ${identities[row.teamId]?.conference}` : ""}</span></th>
+        return <tr key={row.teamId}><td>{row.colleyRank}</td><th scope="row"><Link className="primary-link" href={teamHref(year, row.teamId, week)}>{name}</Link><span className="subtext">{identities[row.teamId]?.abbreviation ?? row.teamId}{identities[row.teamId]?.conference ? ` · ${identities[row.teamId]?.conference}` : ""}</span></th>
           <td>{record.wins}–{record.losses}{record.ties ? `–${record.ties}` : ""} · {record.percentageDenominator ? (record.percentageNumerator / record.percentageDenominator).toFixed(3) : "—"}{!row.eligible && <span className="subtext">Excluded: {record.percentageDenominator ? "below .750" : "no games"}</span>}</td>
            <td className="score-cell">{row.colleyRating.toFixed(6)}</td><td>{row.adjustedRank ?? "—"}</td><td>{row.originalRoute.replaceAll("_", " ")}</td><td><span className={`category category-${row.finalCategory}`}>{row.finalCategory === "playin" ? "Play-in" : row.finalCategory === "bid" ? "Direct bid" : "Outside"}</span></td>{!final && <td>{incomplete ? "Data incomplete" : (() => { const proof = byTeam.get(row.teamId); const label = labels.find(item => item.label === proof?.label)?.text; const metadata = proof?.proofMetadata ? JSON.parse(proof.proofMetadata) as { exception?: string; pollDependent?: boolean } : null; return <>{label ?? (metadata?.exception ? "Policy/model exception" : proof?.state === "unsupported" ? "Computation unsupported" : "Pending proof")}{proof?.witnesses.length ? <details><summary>Possible paths and assumptions</summary><ul>{proof.witnesses.map(witness => <li key={witness.kind}>{witness.kind.replaceAll("_", " ")}: {Object.entries(witness.gameOutcomes).map(([id, outcome]) => `${id} ${outcome}`).join(", ") || "no remaining games"}; eligible poll order: {witness.pollOrderTeamIds.join(" > ") || "empty"}. One possible path, not a guarantee.</li>)}</ul><p>{metadata?.pollDependent ? "Poll-dependent: eligible voter order changes the win-out outcome." : "All eligible poll orders considered for proved claims."}</p></details> : null}</>; })()}</td>}</tr>;
       })}

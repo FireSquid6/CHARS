@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { readSeason, type SourceGameMetadata } from "../src/repository";
+import { readSeason, type SeasonSource, type SourceGameMetadata } from "../src/repository";
 import { buildSnapshots, pollFingerprint, publishSnapshots, readPublished } from "../src/snapshots";
 
 function fixture() {
@@ -84,6 +84,31 @@ test("failed publication keeps previously published manifest and artifacts", asy
     await expect(publishSnapshots(directory, 2024, [snapshots[0]!, { ...snapshots[1]!, key: "../../invalid" }])).rejects.toThrow();
     expect(await readPublished(directory, 2024)).toEqual(previous);
   } finally { db.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("stale weekly poll warning uses reviewed publication time instead of a later derived bound", () => {
+  const { db, metadata } = fixture();
+  try {
+    const source = readSeason(db, 2024, metadata);
+    const poll = source.polls.find(row => row.release.id === "ap1")!;
+    const weekly: SeasonSource = { ...source,
+      games: source.games.map(game => game.id === "1" ? { ...game, kickoffUtc: "2024-09-03T00:00:00.000Z" } :
+        game.id === "2" ? { ...game, kickoffUtc: "2024-09-11T00:00:00.000Z" } : game),
+      polls: source.polls.map(row => row.release.id === "ap1" ? { ...row,
+        release: { ...row.release, releasedAtUtc: "2024-09-09T00:00:00.000Z" } } : row) };
+    const warning = "No poll release following all included games; selection uses an earlier available poll";
+    const derived = buildSnapshots(weekly)[0]!;
+    expect(derived.gameCutoffUtc).toBe("2024-09-11T00:00:00.000Z");
+    expect(derived.pollReleaseId).toBe("ap1");
+    expect(derived.coverage).not.toContain(warning);
+    weekly.pollTiming = { ap1: { reviewedBy: "fixture-reviewer", source: "independent fixture publication record",
+      reviewedAtUtc: "2024-09-12T00:00:00.000Z", releasedAtUtc: "2024-09-02T00:00:00.000Z",
+      pollFingerprint: pollFingerprint(poll) } };
+    const reviewed = buildSnapshots(weekly)[0]!;
+    expect(reviewed.pollReleaseId).toBe("ap1");
+    expect(reviewed.includedGameIds).toEqual(["1"]);
+    expect(reviewed.coverage).toContain(warning);
+  } finally { db.close(); }
 });
 
 test("active season publishes preseason and partial weeks, never future week scores or polls", () => {

@@ -128,7 +128,8 @@ export function buildSnapshots(source: SeasonSource, calendar: CalendarPolicy = 
       coverage.push("Poll publication timing is a derived upper bound, not an independently verified release");
     }
     if (kind === "partial") coverage.push("Partial-week results omitted: historical completion observations unavailable");
-    else if (chosen && kind !== "selection_final" && included.some(game => date(game.kickoffUtc!) >= date(chosen.release.releasedAtUtc!))) {
+    else if (chosen && kind !== "selection_final" && included.some(game => date(game.kickoffUtc!) >=
+      (reviewedWindow(chosen, source.pollTiming?.[chosen.release.id])?.latest ?? date(chosen.release.releasedAtUtc!)))) {
       coverage.push("No poll release following all included games; selection uses an earlier available poll");
     }
     const ratings = computeColley(snapshotGames);

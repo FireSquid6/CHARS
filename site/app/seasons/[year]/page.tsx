@@ -42,7 +42,7 @@ export default async function SeasonPage({ params, searchParams }: PageProps<"/s
         {snapshot.playoff.seeding.cyclicGroups.length > 0 && <p>Head-to-head cycle fallback to Colley: {snapshot.playoff.seeding.cyclicGroups.map(group => group.map(id => identities[id]?.teamName ?? id).join(" / ")).join("; ")}.</p>}
         {snapshot.playoff.shortFieldExplanation && <p>{snapshot.playoff.shortFieldExplanation}</p>}
       </section>
-       <Rankings key={snapshot.key} year={year} rows={rows} identities={identities} final={final} proofs={scenarios?.proofs ?? []} incomplete={!scenarioDataReady} />
+       <Rankings key={snapshot.key} year={year} week={snapshot.key} rows={rows} identities={identities} final={final} proofs={scenarios?.proofs ?? []} incomplete={!scenarioDataReady} />
       {final && <Bracket playoff={snapshot.playoff} identities={identities} />}
     </>}
   </main>;
