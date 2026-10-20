@@ -8,17 +8,10 @@
     "build": "bun run --filter app build",
     "start": "bun run --filter app start",
     "lint": "bun run --filter app lint",
-    "typecheck": "bun run --filter app typegen && bun run --filter app typecheck && bun run --filter chars-algorithm typecheck && bun run --filter chars-db typecheck && bun run --filter chars-cfbd typecheck",
+    "typecheck": "bun run --filter app typegen && bun run --filter app typecheck && bun run --filter chars-db typecheck",
     "test": "bun test",
-    "db:migrate": "bun packages/chars-db/src/migrate.ts",
-    "db:backup": "bun packages/chars-db/src/backup.ts backup",
-    "db:restore": "bun packages/chars-db/src/backup.ts restore",
-    "data:backfill": "bun packages/chars-db/src/backfill.ts",
-    "data:sync": "bun packages/chars-db/src/sync.ts",
-    "data:schedule": "bun packages/chars-db/src/schedule.ts",
-    "scenarios:work": "bun packages/chars-db/src/scenario-worker.ts",
-    "snapshots:rebuild": "bun packages/chars-db/src/snapshots.ts",
-    "scenarios:solve": "bun packages/chars-db/src/scenarios.ts"
+    "db:generate": "bun run --filter chars-db db:generate",
+    "db:migrate": "bun packages/chars-db/src/migrate.ts"
   },
   "trustedDependencies": ["sharp", "unrs-resolver"]
 }
