@@ -1,0 +1,11 @@
+[Unit]
+Description=CHARS bounded scenario queue wakeup
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=2min
+Persistent=true
+Unit=chars-scenarios.service
+
+[Install]
+WantedBy=timers.target

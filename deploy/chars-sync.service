@@ -1,0 +1,17 @@
+[Unit]
+Description=CHARS CFBD scheduled sync (one writer, no web traffic)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=chars
+Group=chars
+WorkingDirectory=/opt/chars
+EnvironmentFile=/etc/chars/chars.env
+ExecStart=/usr/local/bin/bun run data:schedule
+TimeoutStartSec=2h
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/chars

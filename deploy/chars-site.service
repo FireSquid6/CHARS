@@ -1,0 +1,23 @@
+[Unit]
+Description=CHARS Next.js site (single-host Bun)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chars
+Group=chars
+WorkingDirectory=/opt/chars
+EnvironmentFile=/etc/chars/chars.env
+Environment=NODE_ENV=production
+Environment=HOSTNAME=127.0.0.1
+ExecStart=/usr/local/bin/bun run start
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/chars /opt/chars/site/.next
+
+[Install]
+WantedBy=multi-user.target

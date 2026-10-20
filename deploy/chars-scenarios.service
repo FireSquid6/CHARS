@@ -1,0 +1,16 @@
+[Unit]
+Description=CHARS revision-scoped scenario queue worker
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=chars
+Group=chars
+WorkingDirectory=/opt/chars
+EnvironmentFile=/etc/chars/chars.env
+ExecStart=/usr/local/bin/bun run scenarios:work 1
+TimeoutStartSec=15min
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/chars

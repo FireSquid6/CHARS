@@ -1,0 +1,14 @@
+[Unit]
+Description=CHARS midnight Chicago sync, with bounded recovery wakeups
+
+[Timer]
+# Replace BOTH this zone and SYNC_TIMEZONE in /etc/chars/chars.env when configuring another zone.
+OnCalendar=*-*-* 00:00:00 America/Chicago
+Persistent=true
+OnBootSec=2min
+OnUnitInactiveSec=30min
+AccuracySec=1s
+Unit=chars-sync.service
+
+[Install]
+WantedBy=timers.target
