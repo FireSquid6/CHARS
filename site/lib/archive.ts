@@ -44,16 +44,20 @@ function withDatabase<T>(query: (sqlite: ReturnType<typeof openDatabase>["sqlite
 export function getSeasons(): SeasonSummary[] {
   return withDatabase((sqlite) => sqlite.query(`
     SELECT s.year AS year,
-      count(*) AS fbsTeams,
+       sum(CASE WHEN s.classification = 'FBS' THEN 1 ELSE 0 END) AS fbsTeams,
       (SELECT count(*) FROM games g WHERE g.year = s.year
         AND (EXISTS (SELECT 1 FROM seasons fs WHERE fs.year = s.year AND fs.team_id = g.home_team AND fs.classification = 'FBS')
           OR EXISTS (SELECT 1 FROM seasons fs WHERE fs.year = s.year AND fs.team_id = g.away_team AND fs.classification = 'FBS'))) AS scheduled,
       (SELECT count(*) FROM games g WHERE g.year = s.year AND g.home_score IS NOT NULL AND g.away_score IS NOT NULL
         AND (EXISTS (SELECT 1 FROM seasons fs WHERE fs.year = s.year AND fs.team_id = g.home_team AND fs.classification = 'FBS')
           OR EXISTS (SELECT 1 FROM seasons fs WHERE fs.year = s.year AND fs.team_id = g.away_team AND fs.classification = 'FBS'))) AS played
-    FROM seasons s WHERE s.classification = 'FBS'
+    FROM seasons s
     GROUP BY s.year ORDER BY s.year DESC
   `).all() as SeasonSummary[]);
+}
+
+export function hasSeason(year: number): boolean {
+  return withDatabase((sqlite) => sqlite.query("SELECT 1 FROM seasons WHERE year = ? LIMIT 1").get(year) !== null);
 }
 
 export function getStandings(year: number): Standing[] {

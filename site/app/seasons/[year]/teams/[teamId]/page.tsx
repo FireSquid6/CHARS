@@ -2,6 +2,7 @@ import Link from "next/link";
 import { connection } from "next/server";
 import { notFound } from "next/navigation";
 import { getSchedule, getTeam, parseYear } from "../../../../../lib/archive";
+import { formatGameDate } from "../../../../../lib/format-date";
 
 export default async function TeamPage({ params }: PageProps<"/seasons/[year]/teams/[teamId]">) {
   const { year: rawYear, teamId } = await params;
@@ -11,7 +12,6 @@ export default async function TeamPage({ params }: PageProps<"/seasons/[year]/te
   const team = getTeam(year, teamId);
   if (!team) notFound();
   const schedule = getSchedule(year, teamId);
-  const dateFormat = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
 
   return (
     <main className="container content-page">
@@ -22,7 +22,7 @@ export default async function TeamPage({ params }: PageProps<"/seasons/[year]/te
           {schedule.map((game) => {
             const played = game.teamScore !== null && game.opponentScore !== null;
             const result = !played ? "Upcoming" : game.teamScore! > game.opponentScore! ? "W" : game.teamScore! < game.opponentScore! ? "L" : "T";
-            return <tr key={game.gameId}><td className="muted">{game.week}</td><td className="date-cell">{dateFormat.format(new Date(game.startDate))}</td><th scope="row"><span className="matchup-prefix">{game.home ? "vs" : "at"}</span> {game.opponentClass === "FBS" ? <Link className="primary-link" href={`/seasons/${year}/teams/${encodeURIComponent(game.opponentId)}`}>{game.opponentName} <span className="arrow" aria-hidden="true">↗</span></Link> : <span>{game.opponentName}</span>}{game.opponentClass && game.opponentClass !== "FBS" && <span className="subtext">{game.opponentClass}</span>}</th><td className="score-cell">{played ? `${game.teamScore} – ${game.opponentScore}${game.overtimes ? ` (${game.overtimes} OT)` : ""}` : "—"}</td><td><span className={`result result-${result.toLowerCase()}`}>{result}</span></td></tr>;
+            return <tr key={game.gameId}><td className="muted">{game.week}</td><td className="date-cell">{formatGameDate(game.startDate)}</td><th scope="row"><span className="matchup-prefix">{game.home ? "vs" : "at"}</span> {game.opponentClass === "FBS" ? <Link className="primary-link" href={`/seasons/${year}/teams/${encodeURIComponent(game.opponentId)}`}>{game.opponentName} <span className="arrow" aria-hidden="true">↗</span></Link> : <span>{game.opponentName}</span>}{game.opponentClass && game.opponentClass !== "FBS" && <span className="subtext">{game.opponentClass}</span>}</th><td className="score-cell">{played ? `${game.teamScore} – ${game.opponentScore}${game.overtimes ? ` (${game.overtimes} OT)` : ""}` : "—"}</td><td><span className={`result result-${result.toLowerCase()}`}>{result}</span></td></tr>;
           })}
         </tbody></table>{schedule.length === 0 && <p className="empty">No games are scheduled for this team yet.</p>}</div>
       </section>
