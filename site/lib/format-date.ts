@@ -1,7 +1,9 @@
+// Use the furthest-west domestic college-football timezone for a consistent schedule day.
+// The database has no venue timezone, so this is an approximation for non-Hawai'i games.
 const gameDateFormatter = new Intl.DateTimeFormat("en-US", {
   month: "short",
   day: "numeric",
-  timeZone: "America/New_York",
+  timeZone: "Pacific/Honolulu",
 });
 
 export function formatGameDate(startDate: number): string {
