@@ -13,8 +13,8 @@
 ## 2. Persistent inputs, snapshots and backfill
 
 - [ ] **Schema constraint: do not replace or alter the existing SQLite schema/migrations without explicit approval.** Existing tables lack completion/classification, revision, snapshot and lease columns. An ignored `.cache` file store is allowed for typed source metadata and atomic JSON snapshot publication without changing tables; this implements a limited audited retrospective read path, not transactional SQLite publication, a durable scheduler, or proved status. Design approved additive migrations or a more robust coordinated external store before claiming the entire product complete.
-- [ ] Validate live CFBD games, membership, calendar and poll schemas; server-only API key, authenticated fetch, canonical IDs/aliases, season-specific FBS/FCS membership and data provenance.
-- [ ] Backfill 1998 through provider/calendar-derived current season, including schedules, FCS opponents, season-specific poll releases and coverage gaps; provide absent-key setup/error state and `.env.example`.
+- [ ] Offline schema fixtures and bearer-authenticated season adapters added in `packages/chars-db/src/cfbd.ts`; live CFBD schema/coverage verification and operator-reviewed aliases remain open. Unknown IDs/classifications fail closed.
+- [ ] `data:backfill` supports a year/range with July–June timezone convention, schedules, season roster, polls and raw cache audit; provider-derived season detection and comprehensive real historical validation remain open. `.env.example` and keyless error added.
 - [ ] Pre-CCG freeze requires an operator-verified calendar and complete classification; retrospective weekly builder isolates completed games by kickoff/week and polls by release/week, with provisional AP fallback and explicit gaps. Historical completion times, current partial weeks, comprehensive schedule coverage validation and provider-derived calendars remain unimplemented.
 - [ ] Typed read-only bun:sqlite repository and content-addressed JSON artifacts with atomic manifest replacement, hashes and coverage/pending indicators are implemented in `packages/chars-db/src/`. SQLite revisions, transactional coordination with source writes, live cache invalidation and stale status remain open.
 
@@ -35,7 +35,7 @@
 
 ## 5. Durable daily updates and delivery
 
-- [ ] Durable 00:00 `America/Chicago` scheduler outside Next.js, configurable timezone and DST handling, lease/unique-run key, crash recovery, retries, manual replay, quotas and run-health inspection.
-- [ ] Validate and hash full active-season fetch before upsert; correct scores/schedules/classifications/polls, bounded historical reconciliation and dependent snapshot/scenario invalidation. Leave previous publication available on failure.
-- [ ] Deployment on one durable shared SQLite writer/volume, WAL-safe backup/restore, cache invalidation and resumable background scenario workers.
+- [ ] Existing midnight systemd timer now has `data:schedule`; local-day keys, durable cache lease, bounded HTTP retries, manual retry/status and recent-season reconciliation added. Not DB-backed; stale lock/manual journal review and no automated catch-up plan beyond current day remain limitations.
+- [ ] Validated fetch and transactional regular-game/poll upsert with raw/hash sidecars and postseason calendar evidence added; filesystem/SQLite publication cannot be atomic. Missing-source rows trigger coverage warnings, previous publication stays on failure. Fine-grained scenario invalidation remains open.
+- [ ] WAL-consistent SQLite `db:backup` added; cache backup/restore remains operator procedure. No scenario worker or cross-store transaction in this branch.
 - [ ] Pin compatible Bun/Next dependencies and lockfile; add migrate/backfill/sync/rebuild/scenario commands, typechecks, integration/browser tests and README with credentials, policies, timezone, data coverage and proof limitations.
