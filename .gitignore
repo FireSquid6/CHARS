@@ -16,4 +16,4 @@ coverage/
 *.db-wal
 *.db-shm
 
-one-offs
+one-off/
