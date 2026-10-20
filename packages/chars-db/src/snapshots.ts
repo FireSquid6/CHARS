@@ -172,16 +172,20 @@ function buildConsistent(db: Database, plan: SnapshotPlan, nowUtc: string, expec
   const poll = selectPoll(db, plan);
   if (plan.kind === "selection_final" && !poll) reasons.push("missing corresponding pre-CCG poll release");
   if (plan.kind === "week_final" && !poll) reasons.push("missing contemporaneous poll release");
-  const pollEntries = poll ? rows<{ teamId: string; rank: number | null }>(db,
-    "SELECT team_id AS teamId, rank FROM poll_entries WHERE release_id=? ORDER BY rank, team_id", poll.id)
-    .filter((entry): entry is { teamId: string; rank: number } => entry.rank !== null) : [];
+  const sourcePollEntries = poll ? rows<{ teamId: string; name: string; abbreviation: string | null;
+    rank: number | null; points: number | null }>(db, `SELECT e.team_id AS teamId, t.name, t.abbreviation,
+    e.rank, e.points FROM poll_entries e JOIN teams t ON t.id=e.team_id
+    WHERE e.release_id=? ORDER BY e.rank, e.team_id`, poll.id) : [];
+  const pollEntries = sourcePollEntries.filter((entry): entry is typeof entry & { rank: number } => entry.rank !== null)
+    .map(({ teamId, rank }) => ({ teamId, rank }));
   if (plan.kind === "selection_final" && !pollEntries.length) reasons.push("empty selection poll");
   const input = { season: plan.season, teams, games: included };
   const revisionRefs = included.map(g => [g.id, g.resultRevision, g.payloadHash]);
   const digest = hash({ plan, teams: teams.map(t => [t.teamId, t.membership]),
     calendar: weekRows.filter(w => w.end_utc <= plan.gameCutoff).map(w => [w.week, w.start_utc, w.end_utc, w.source_hash]),
-    games: revisionRefs, poll: poll ? [poll.id, poll.source_hash, poll.effective_at_utc, poll.released_at_utc] : null,
-    entries: pollEntries, coverage, reasons: [...new Set(reasons)].sort(),
+    games: revisionRefs, poll: poll ? [poll.id, poll.poll_type, poll.game_week, poll.source_hash,
+      poll.effective_at_utc, poll.released_at_utc, poll.timing_provenance, poll.provider_season_type] : null,
+    entries: sourcePollEntries, coverage, reasons: [...new Set(reasons)].sort(),
     policy: POLICY_VERSION, model: MODEL_VERSION, calendarPolicy: CALENDAR_POLICY_VERSION });
   const existing = publishedSnapshot(db, plan.key);
   const invalidations = existing ? rows<{ reason: string }>(db, `SELECT reason FROM snapshot_input_invalidations
@@ -235,6 +239,14 @@ function buildConsistent(db: Database, plan: SnapshotPlan, nowUtc: string, expec
           retrospective: true }), nowUtc);
     for (const game of included) db.query(`INSERT INTO snapshot_games VALUES (?,?,?,?)`)
       .run(plan.key, revision, game.id, game.resultRevision);
+    db.query(`INSERT INTO snapshot_poll_audit VALUES (?,?,?,?)`).run(plan.key, revision,
+      poll ? JSON.stringify({ releaseId: poll.id, type: poll.poll_type, gameWeek: poll.game_week,
+        effectiveAtUtc: poll.effective_at_utc, releasedAtUtc: poll.released_at_utc,
+        timingProvenance: poll.timing_provenance, sourceHash: poll.source_hash,
+        providerSeasonType: poll.provider_season_type,
+        fallback: plan.season >= 2014 && poll.poll_type === "ap" }) : null,
+      JSON.stringify(sourcePollEntries.map(entry => ({ ...entry,
+        eligibleAtSnapshot: result.seeding.rankings.find(r => r.teamId === entry.teamId)?.eligible ?? false }))));
     db.query(`INSERT INTO snapshot_h2h_audit VALUES (?,?,?,?)`).run(plan.key, revision,
       JSON.stringify(result.seeding.selection.graph), JSON.stringify(result.seeding.selection.unappliedOutsiderBidClaims));
     for (const ranking of result.seeding.rankings) db.query(`INSERT INTO snapshot_rankings

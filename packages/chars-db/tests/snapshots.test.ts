@@ -94,6 +94,27 @@ test("week zero, preseason, AP fallback, and pre-CCG final isolate future result
   } finally { db.close(); }
 });
 
+test("poll provenance and every source entry are pinned separately for each published revision", async () => {
+  const { db } = await fixture();
+  try {
+    db.query("INSERT INTO poll_entries (release_id,team_id,rank) VALUES ('cfp-final','B',1)").run();
+    rebuildSnapshots(db, 2020, "2020-12-10T00:00:00.000Z");
+    const read = (revision: number) => db.query<{ metadata_json: string; entries_json: string }, [number]>(
+      "SELECT metadata_json, entries_json FROM snapshot_poll_audit WHERE snapshot_key='2020:selection-final' AND snapshot_revision=?").get(revision)!;
+    const original = read(1);
+    expect(JSON.parse(original.entries_json)).toMatchObject([
+      { teamId: "A", rank: 1, eligibleAtSnapshot: true },
+      { teamId: "B", rank: 1, eligibleAtSnapshot: false },
+    ]);
+    db.query("UPDATE poll_releases SET source_hash='corrected-source' WHERE id='cfp-final'").run();
+    db.query("UPDATE poll_entries SET rank=8 WHERE release_id='cfp-final' AND team_id='B'").run();
+    expect(rebuildSnapshots(db, 2020, "2020-12-10T00:00:00.000Z").published).toContain("2020:selection-final");
+    expect(read(1)).toEqual(original);
+    expect(JSON.parse(read(2).metadata_json).sourceHash).toBe("corrected-source");
+    expect(JSON.parse(read(2).entries_json).find((entry: { teamId: string }) => entry.teamId === "B").rank).toBe(8);
+  } finally { db.close(); }
+});
+
 test("unverified final stays unavailable, previous final remains visible on failed rebuild", async () => {
   const { db, repo } = await fixture();
   try {

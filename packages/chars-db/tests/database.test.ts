@@ -35,7 +35,7 @@ test("migrations are repeatable and every inventory table exists", async () => {
   const { db } = await setup();
   try {
     await migrate(db);
-    expect(db.query("SELECT version FROM schema_migrations").all()).toHaveLength(11);
+    expect(db.query("SELECT version FROM schema_migrations").all()).toHaveLength(12);
     const names = db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'").all().map(row => row.name);
     for (const name of ["seasons", "teams", "team_aliases", "team_seasons", "games", "game_revisions", "ingestion_payloads", "poll_releases", "poll_entries", "snapshots", "snapshot_games", "snapshot_rankings", "selection_events", "bracket_slots", "scenario_jobs", "scenario_job_secrets", "scenario_statuses", "scenario_witnesses", "sync_runs", "job_leases", "schema_migrations"]) {
       expect(names).toContain(name);
@@ -73,7 +73,7 @@ test("upgrades a populated, previously migrated 001 database without losing FK-l
     await migrate(upgraded);
     await migrate(upgraded);
     expect(upgraded.query<{ version: string }, []>("SELECT version FROM schema_migrations ORDER BY version").all().map(row => row.version))
-      .toEqual(["001_initial.sql", "002_observations_and_snapshot_integrity.sql", "003_calendar_and_provenance.sql", "004_input_revisions_and_gaps.sql", "005_snapshot_publication.sql", "006_input_generation_and_publication_state.sql", "007_scenario_work.sql", "008_sync_queue.sql", "009_sync_work_plans.sql", "010_scenario_checkpoint_keys.sql", "011_snapshot_head_to_head_audit.sql"]);
+      .toEqual(["001_initial.sql", "002_observations_and_snapshot_integrity.sql", "003_calendar_and_provenance.sql", "004_input_revisions_and_gaps.sql", "005_snapshot_publication.sql", "006_input_generation_and_publication_state.sql", "007_scenario_work.sql", "008_sync_queue.sql", "009_sync_work_plans.sql", "010_scenario_checkpoint_keys.sql", "011_snapshot_head_to_head_audit.sql", "012_snapshot_poll_audit.sql"]);
     expect(upgraded.query("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(upgraded.query<{ payload_id: string }, []>("SELECT payload_id FROM game_revisions WHERE game_id = 'game'").get()?.payload_id).toBe("payload");
     expect(upgraded.query<{ payload_id: string }, []>("SELECT payload_id FROM poll_releases WHERE id = 'poll'").get()?.payload_id).toBe("payload");
@@ -85,6 +85,34 @@ test("upgrades a populated, previously migrated 001 database without losing FK-l
     expect(upgraded.query("SELECT * FROM scenario_witnesses").all()).toHaveLength(2);
     upgraded.query("INSERT INTO poll_releases (id, season, poll_type, source_hash) VALUES ('old-poll', 2025, 'ap', 'hash')").run();
     expect(() => upgraded.query("UPDATE snapshots SET poll_release_id = 'old-poll' WHERE snapshot_key = 'week'").run()).toThrow("snapshot poll season mismatch");
+    expect(upgraded.query("PRAGMA foreign_key_check").all()).toEqual([]);
+  } finally { upgraded.close(); }
+});
+
+test("populated 010 publication survives additive 011/012 upgrade without fabricated audits", async () => {
+  const { db, path } = await setup();
+  try {
+    db.query("INSERT INTO seasons (year,state,calendar_policy_version) VALUES (2020,'final','calendar')").run();
+    db.query("INSERT INTO teams (id,name) VALUES ('legacy','Legacy')").run();
+    db.query(`INSERT INTO poll_releases (id,season,poll_type,source_hash,timing_provenance)
+      VALUES ('legacy-poll',2020,'cfp','original','derived_convention')`).run();
+    db.query("INSERT INTO poll_entries (release_id,team_id,rank) VALUES ('legacy-poll','legacy',1)").run();
+    db.query(`INSERT INTO snapshots (snapshot_key,revision,season,kind,game_cutoff_utc,poll_release_id,
+      input_hash,policy_version,model_version,calendar_policy_version,coverage_json,published_at_utc)
+      VALUES ('2020:legacy',1,2020,'week_final','2020-09-01','legacy-poll','hash','policy','model','calendar',
+        '{"complete":true,"poll":{"type":"cfp","timingProvenance":"derived_convention"}}','2020-09-02')`).run();
+    db.query("INSERT INTO snapshot_publications (snapshot_key,revision,published_at_utc,state) VALUES ('2020:legacy',1,'2020-09-02','current')").run();
+    db.exec("DROP TABLE snapshot_poll_audit; DROP TABLE snapshot_h2h_audit");
+    db.query("DELETE FROM schema_migrations WHERE version IN ('011_snapshot_head_to_head_audit.sql','012_snapshot_poll_audit.sql')").run();
+  } finally { db.close(); }
+  const upgraded = openDatabase({ path });
+  try {
+    await migrate(upgraded);
+    await migrate(upgraded);
+    expect(upgraded.query("SELECT * FROM schema_migrations").all()).toHaveLength(12);
+    expect(upgraded.query<{ revision: number }, []>("SELECT revision FROM snapshot_publications WHERE snapshot_key='2020:legacy'").get()?.revision).toBe(1);
+    expect(upgraded.query("SELECT * FROM snapshot_h2h_audit").all()).toEqual([]);
+    expect(upgraded.query("SELECT * FROM snapshot_poll_audit").all()).toEqual([]);
     expect(upgraded.query("PRAGMA foreign_key_check").all()).toEqual([]);
   } finally { upgraded.close(); }
 });
@@ -122,7 +150,7 @@ test("two independent processes migrate the same new database without racing ver
   }
   const db = openDatabase({ path });
   try {
-    expect(db.query("SELECT * FROM schema_migrations").all()).toHaveLength(11);
+    expect(db.query("SELECT * FROM schema_migrations").all()).toHaveLength(12);
     expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
   } finally { db.close(); }
 });

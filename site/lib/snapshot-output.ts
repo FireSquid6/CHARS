@@ -23,7 +23,8 @@ export function readSnapshotOutput(year: number, key: string, revision?: number)
     db.exec("PRAGMA busy_timeout=5000");
     return db.transaction(() => {
       assertSnapshotOutputSchema(db);
-      const snapshot = db.query<SnapshotRow, [number, string, number | null, number | null]>(`SELECT s.*, p.state AS publication_state
+      const snapshot = db.query<SnapshotRow & { pointer_revision: number }, [number, string, number | null, number | null]>(`SELECT s.*, p.state AS publication_state,
+        p.revision AS pointer_revision
         FROM snapshots s JOIN snapshot_publications p ON p.snapshot_key=s.snapshot_key
         WHERE s.season=? AND s.snapshot_key=? AND (s.revision=? OR (? IS NULL AND s.revision=p.revision))`)
         .get(year, key, revision ?? null, revision ?? null);
@@ -65,10 +66,21 @@ export function readSnapshotOutput(year: number, key: string, revision?: number)
         WHERE snapshot_key=? AND snapshot_revision=? ORDER BY round, position`).all(key, snapshot.revision);
       const audit = db.query<{ graph_json: string; unapplied_claims_json: string }, [string, number]>(`SELECT graph_json, unapplied_claims_json
         FROM snapshot_h2h_audit WHERE snapshot_key=? AND snapshot_revision=?`).get(key, snapshot.revision);
-      const poll = snapshot.poll_release_id ? db.query<{ id: string; poll_type: string; game_week: number | null;
-        source_hash: string; released_at_utc: string | null; effective_at_utc: string | null; timing_provenance: string }, [string]>(
-        `SELECT id, poll_type, game_week, source_hash, released_at_utc, effective_at_utc, timing_provenance
-         FROM poll_releases WHERE id=?`).get(snapshot.poll_release_id) : null;
+      const pollAudit = db.query<{ metadata_json: string | null; entries_json: string }, [string, number]>(
+        `SELECT metadata_json, entries_json FROM snapshot_poll_audit WHERE snapshot_key=? AND snapshot_revision=?`)
+        .get(key, snapshot.revision);
+      // Old publications predate the audit table's rows. Coverage is pinned, but entries and
+      // missing timing fields are unknown; never consult today's poll_releases or poll_entries.
+      const coverage = JSON.parse(snapshot.coverage_json) as { complete: boolean; reasons: string[];
+        poll?: Record<string, unknown> | null };
+      const poll = pollAudit ? { availability: "pinned" as const,
+        metadata: pollAudit.metadata_json ? JSON.parse(pollAudit.metadata_json) as unknown : null,
+        entries: JSON.parse(pollAudit.entries_json) as unknown, entriesAvailable: true } :
+        snapshot.poll_release_id ? { availability: "coverage_only" as const,
+          metadata: { releaseId: snapshot.poll_release_id, ...(coverage.poll ?? {}) },
+          entries: null, entriesAvailable: false,
+          note: "Poll entry ranks, names and unrecorded release timing are unavailable for this pre-012 revision." } :
+          { availability: "none" as const, metadata: null, entries: null, entriesAvailable: false };
       const initialBid = rankings.filter(r => ["rating_bid", "colley_minimum_bid"].includes(r.originalRoute)).map(r => r.teamId);
       const initialPlayin = rankings.filter(r => ["rating_playin", "poll_playin"].includes(r.originalRoute)).map(r => r.teamId);
       const finalBid = rankings.filter(r => r.finalCategory === "bid").map(r => r.teamId);
@@ -78,11 +90,11 @@ export function readSnapshotOutput(year: number, key: string, revision?: number)
         pairId: row.sourceSlotA, teamAId: row.teamAId, teamBId: row.teamBId }));
       const playinByes = roundZero.filter(row => row.teamBId === null &&
         finalPlayin.includes(row.teamAId as string)).map(row => ({ seed: row.seed, teamId: row.teamAId }));
-      const coverage = JSON.parse(snapshot.coverage_json) as { complete: boolean; reasons: string[] };
       return {
         snapshot: { key, revision: snapshot.revision, season: year, week: snapshot.week, kind: snapshot.kind,
           gameCutoffUtc: snapshot.game_cutoff_utc, pollCutoffUtc: snapshot.poll_cutoff_utc,
-          publishedAtUtc: snapshot.published_at_utc, publicationState: snapshot.publication_state,
+          publishedAtUtc: snapshot.published_at_utc,
+          publicationState: snapshot.revision === snapshot.pointer_revision ? snapshot.publication_state : "historical",
           inputHash: snapshot.input_hash, coverage },
         policy: { version: snapshot.policy_version, modelVersion: snapshot.model_version,
           calendarPolicyVersion: snapshot.calendar_policy_version, fbsOnlyRatings: true,

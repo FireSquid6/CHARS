@@ -14,8 +14,11 @@ includes coverage and policy, pinned game-revision references, ranking records a
 selection routes, stored head-to-head graph/SCC audit and swaps, and fixed bracket slots
 and matchups. Revisions published before migration 011 have `auditAvailable: false` and
 null graph/claims; the endpoint does not infer their history from corrected live games.
-It never returns raw ingestion payloads, credentials, or a recomputed selection. If
-migration 011 has not been applied, the endpoint returns a migration-required 503;
+New revisions pin selected poll timing, source hash, and all original poll entries,
+including ties and ineligible ranks. Pre-012 revisions use only the coverage metadata
+captured at publication, marking poll entries and unrecorded timing unavailable rather
+than rereading a corrected release. It never returns raw ingestion payloads,
+credentials, or a recomputed selection. If migration 012 has not been applied, the endpoint returns a migration-required 503;
 run `bun run db:migrate` with the site and workers stopped after a verified backup.
 
 ## Synthetic browser acceptance
@@ -35,5 +38,8 @@ SYNTHETIC_BROWSER_URL=http://localhost:3199 bun test site/tests/browser.integrat
 Check `/` → `/seasons/2020`, click Older and a status bubble, use browser Back and the
 week selector, then inspect the final bracket at mobile width and focus the scrollable
 rankings table with Tab. The Bun integration test checks server-rendered HTML and JSON;
-manual browser checks cover actual navigation and viewport. Verify Tab/Enter in a browser
+This fixture contains hand-authored rankings and status labels for **UI rendering only**;
+it does not validate the selection engine or mathematically prove scenarios. Functional
+engine and scenario validity is covered by separate algorithm tests. Manual browser
+checks cover actual navigation and viewport. Verify Tab/Enter in a browser
 with keyboard-event support.
