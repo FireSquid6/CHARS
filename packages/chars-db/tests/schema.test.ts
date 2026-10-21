@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { eq, getTableColumns, getTableName } from "drizzle-orm";
 import { openDatabase } from "../src/database";
-import { conferences, games, pollEntries, pollRankings, pollReleases, pollTeamNames, seasons, teams } from "../src/schema";
+import { conferences, games, gameTypes, pollEntries, pollRankings, pollReleases, pollTeamNames, seasons, teams } from "../src/schema";
 
 const connection = process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL
   ? openDatabase(process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL)
@@ -37,4 +37,10 @@ test.skipIf(!connection)("schema maps the existing PostgreSQL database without m
 
 test("requires an explicit database configuration", () => {
   expect(() => openDatabase("")).toThrow("DATABASE_URL is required");
+});
+
+test("game type is nullable and restricted to the four supported categories", () => {
+  expect(getTableColumns(games).gameType.name).toBe("game_type");
+  expect(getTableColumns(games).gameType.notNull).toBe(false);
+  expect(gameTypes).toEqual(["regular", "ccg", "playoff", "bowl"]);
 });

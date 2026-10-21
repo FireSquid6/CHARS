@@ -27,8 +27,10 @@ export const seasons = pgTable("seasons", {
   index("seasons_year_idx").on(table.year),
 ]);
 
-// Only regular-season games belong here. Equal scores represent ties;
-// null scores represent results that are not yet known.
+export const gameTypes = ["regular", "ccg", "playoff", "bowl"] as const;
+
+// Null game type means the source could not establish a classification.
+// Equal scores represent ties; null scores represent results not yet known.
 export const games = pgTable("games", {
   gameId: bigint("game_id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
   homeTeam: text("home_team").notNull().references(() => teams.teamId),
@@ -39,11 +41,13 @@ export const games = pgTable("games", {
   homeScore: integer("home_score"),
   awayScore: integer("away_score"),
   overtimes: integer("overtimes"),
+  gameType: text("game_type", { enum: gameTypes }),
 }, (table) => [
   check("games_different_teams_check", sql`${table.homeTeam} <> ${table.awayTeam}`),
   check("games_home_score_check", sql`${table.homeScore} >= 0`),
   check("games_away_score_check", sql`${table.awayScore} >= 0`),
   check("games_overtimes_check", sql`${table.overtimes} >= 0`),
+  check("games_game_type_check", sql`${table.gameType} IN ('regular', 'ccg', 'playoff', 'bowl')`),
   index("games_year_week_idx").on(table.year, table.week),
   index("games_home_team_year_idx").on(table.homeTeam, table.year),
   index("games_away_team_year_idx").on(table.awayTeam, table.year),
@@ -121,6 +125,7 @@ export type NewSeason = typeof seasons.$inferInsert;
 export type Classification = typeof classifications[number];
 export type Game = typeof games.$inferSelect;
 export type NewGame = typeof games.$inferInsert;
+export type GameType = typeof gameTypes[number];
 export type PollRelease = typeof pollReleases.$inferSelect;
 export type NewPollRelease = typeof pollReleases.$inferInsert;
 export type PollEntry = typeof pollEntries.$inferSelect;
