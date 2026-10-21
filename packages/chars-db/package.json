@@ -5,14 +5,12 @@
   "private": true,
   "exports": {
     ".": "./index.ts",
-    "./schema": "./src/schema.ts",
-    "./migrate": "./src/migrate.ts"
+    "./schema": "./src/schema.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "db:generate": "drizzle-kit generate",
-    "db:migrate": "bun src/migrate.ts"
+    "db:pull": "drizzle-kit pull"
   },
   "devDependencies": {
     "@types/bun": "latest",

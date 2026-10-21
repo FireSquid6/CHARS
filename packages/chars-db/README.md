@@ -1,59 +1,20 @@
 # chars-db
 
-SQLite database package using Drizzle ORM and Bun's built-in SQLite driver.
+PostgreSQL schema and Bun SQL / Drizzle connection for the existing `cfbdb` database. The database is the source of truth: **this package does not create tables or run migrations**. The old SQLite migrations were removed; do not apply them to `cfbdb`.
 
-From this directory:
-
-```sh
-bun install
-DATABASE_PATH=/absolute/path/to/chars.sqlite bun run db:migrate
-bun run typecheck
-bun test
-```
-
-The parent directory of the database must already exist. `DATABASE_PATH` defaults
-to `chars.sqlite` in the process working directory. From the repository root,
-`bun run db:migrate` also applies migrations.
+Set `DATABASE_URL` to a PostgreSQL connection string for `cfbdb`, then run `bun run typecheck` and `bun test`. For a local peer-authenticated server, set `DATABASE_SOCKET` to the full Unix socket filename (for example, `/path/to/.s.PGSQL.5432`) as well as a URL containing the matching user and database name. `TEST_DATABASE_URL` can override the test connection. Database integration tests perform read-only queries and skip without a configured connection.
 
 ```ts
 import { openDatabase, teams } from "chars-db";
 
 const connection = openDatabase();
 try {
-  connection.db.insert(teams).values({
-    teamId: "example",
-    teamName: "Example University",
-    abbreviation: "EXU",
-  }).run();
-  console.log(connection.db.select().from(teams).all());
+  console.log(await connection.db.select().from(teams).limit(10));
 } finally {
-  connection.close();
+  await connection.close();
 }
 ```
 
-## Schema
+The schema mirrors the existing tables `teams`, `conferences`, `seasons`, `games`, `poll_releases`, `poll_entries`, `poll_team_names`, and the read-only `poll_rankings` view. Columns use camelCase in TypeScript and snake_case in PostgreSQL. Game dates are Unix milliseconds (`bigint` in PostgreSQL, `number` in Drizzle); poll dates are nullable SQL `date` values (`YYYY-MM-DD` strings). `game_id` is a generated bigint identity. Only regular-season games belong in `games`.
 
-- `teams` and `conferences`: string primary keys.
-- `seasons`: team/year composite primary key, conference foreign key, nullable
-  division, and checked `FBS | FCS | DIV2 | DIV3` classification.
-- `games`: integer primary key, team foreign keys, year/week, kickoff date,
-  nullable scores and overtime count. Store **only regular-season games**; callers
-  must exclude postseason games before insertion. Equal scores support ties;
-  null scores must not be interpreted as a completed 0–0 tie.
-- `pollReleases`: string `releaseId` primary key and string `pollId` (e.g. `AP`
-  or `CFP`), year/week and release date. No separate polls table is required.
-- `pollEntries`: release/team composite primary key and positive rank. Shared
-  ranks are allowed for tied poll positions.
-
-TypeScript fields use camelCase; SQLite columns use snake_case. Both date fields
-accept/return `Date` values and are stored as UTC Unix milliseconds. All fields
-are required except division and game scores/overtimes. Foreign keys are enabled
-on every connection, along with WAL and a five-second busy timeout.
-
-Import tables and inferred select/insert types from `chars-db` or
-`chars-db/schema`. Opening a connection does not run migrations. To migrate
-programmatically, import `migrateDatabase` from `chars-db/migrate`.
-
-After schema edits, run `bun run db:generate` and commit the generated SQL and
-metadata, then run `bun run db:migrate`. This initial schema targets a new
-database; it does not convert databases from the previous application schema.
+Before changing these definitions, inspect the live database schema. Do not run `drizzle-kit generate` or `migrate` against it; the existing database has its own schema history.

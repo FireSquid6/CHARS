@@ -8,8 +8,8 @@ export default async function SeasonPage({ params }: PageProps<"/seasons/[year]"
   const year = parseYear(rawYear);
   if (year === null) notFound();
   await connection();
-  const standings = getStandings(year);
-  if (!standings.length && !hasSeason(year)) notFound();
+  const standings = await getStandings(year);
+  if (!standings.length && !(await hasSeason(year))) notFound();
 
   return (
     <main className="container content-page">

@@ -9,9 +9,9 @@ export default async function TeamPage({ params }: PageProps<"/seasons/[year]/te
   const year = parseYear(rawYear);
   if (year === null) notFound();
   await connection();
-  const team = getTeam(year, teamId);
+  const team = await getTeam(year, teamId);
   if (!team) notFound();
-  const schedule = getSchedule(year, teamId);
+  const schedule = await getSchedule(year, teamId);
 
   return (
     <main className="container content-page">
