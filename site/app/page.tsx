@@ -4,7 +4,7 @@ import { getSeasons } from "../lib/archive";
 
 async function SeasonsTable() {
   await connection();
-  const seasons = getSeasons();
+  const seasons = await getSeasons();
   return (
     <div className="table-scroll">
       <table>
