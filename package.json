@@ -8,7 +8,7 @@
     "build": "bun run --filter site build",
     "start": "bun run --filter site start",
     "lint": "bun run --filter site lint",
-    "typecheck": "bun --cwd site --bun next typegen && bun run --filter site typecheck && bun run --filter chars-db typecheck && bun run --filter chars-cli typecheck",
+    "typecheck": "bun --cwd site --bun next typegen && bun run --filter site typecheck && bun run --filter chars-db typecheck && bun run --filter chars-cli typecheck && bun run --filter chars-colley typecheck",
     "test": "bun test",
     "db:pull": "bun run --filter chars-db db:pull",
     "cli": "bun run --filter chars-cli start"
