@@ -7,6 +7,7 @@ test("Commander exposes the archive commands without connecting for help", async
   program.exitOverride().configureOutput({ writeOut: (text) => { output += text; } });
   try { await program.parseAsync(["node", "chars", "--help"]); } catch { /* Commander exits after help. */ }
   expect(output).toContain("standings <year>");
+  expect(output).toContain("rankings [options] <year>");
   expect(output).toContain("sql <query>");
 });
 

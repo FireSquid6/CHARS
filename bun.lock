@@ -12,6 +12,7 @@
         "chars": "./src/main.ts",
       },
       "dependencies": {
+        "chars-colley": "workspace:*",
         "chars-db": "workspace:*",
         "commander": "^14.0.0",
       },

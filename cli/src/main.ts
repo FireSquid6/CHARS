@@ -3,6 +3,7 @@ import { Command, InvalidArgumentError } from "commander";
 import { openDatabase } from "chars-db";
 import { getSchedule, getSeasons, getStandings, hasSeason, parseYear, type Standing } from "chars-db/archive";
 import { render, type Format, type Row } from "./output";
+import { getRankings } from "./rankings";
 
 const gameDate = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "Pacific/Honolulu" });
 
@@ -10,6 +11,11 @@ function year(value: string): number {
   const parsed = parseYear(value);
   if (parsed === null) throw new InvalidArgumentError("year must be four digits");
   return parsed;
+}
+
+function week(value: string): number {
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new InvalidArgumentError("week must be a nonnegative game-week number");
+  return Number(value);
 }
 
 function resolveTeam(standings: Standing[], input: string): Standing {
@@ -44,6 +50,16 @@ export function createProgram(write: (output: string) => void = console.log): Co
   program.command("standings").description("List FBS records for a season")
     .argument("<year>", "four-digit season year", year)
     .action(async (season: number) => output(await seasonStandings(season)));
+
+  program.command("rankings").description("Calculate Colley rankings and snapshot playoff categories (not clinch/elimination proofs)")
+    .argument("<year>", "four-digit season year", year)
+    .option("-w, --week <week>", "rankings after a game week", week)
+    .option("-a, --all-weeks", "rankings after every available game week")
+    .option("--terminal-cutoff <date>", "last full regular-season weekend cutoff (YYYY-MM-DD UTC)")
+    .action(async (season: number, options: { week?: number; allWeeks?: boolean; terminalCutoff?: string }) => {
+      if (options.week !== undefined && options.allWeeks) throw new Error("Choose either --week or --all-weeks.");
+      output(await getRankings(season, options));
+    });
 
   program.command("team").description("Show an FBS team's record and schedule")
     .argument("<year>", "four-digit season year", year)

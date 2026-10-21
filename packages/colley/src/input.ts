@@ -38,15 +38,16 @@ export function validateInput(input: Input): Input {
   return { ...input, games: [...games.values()] };
 }
 
-export function buildSnapshot(input: Input, cutoff: string): Snapshot {
+export function buildSnapshot(input: Input, cutoff: string, associatedPollId?: string): Snapshot {
   input = validateInput(input);
   if (!date(cutoff) || cutoff > input.terminalCutoff) throw new Error("Snapshot cutoff must be ISO and no later than terminal cutoff");
   const games = input.games.filter(g => g.kind === "regular" && g.status === "completed" && g.completedAt! <= cutoff && g.scheduledAt <= input.terminalCutoff).sort((a, b) => a.id.localeCompare(b.id));
   const remaining = input.games.filter(g => g.kind === "regular" && g.status !== "cancelled" && !(g.status === "completed" && g.completedAt! <= cutoff) && g.scheduledAt <= input.terminalCutoff).map(g => ({ ...g, status: "scheduled" as const, completedAt: undefined, homeScore: null, awayScore: null })).sort((a, b) => a.id.localeCompare(b.id));
   const eligiblePolls = input.polls.filter(p => p.releasedAt <= cutoff);
   const type = input.year < 2014 || !eligiblePolls.some(p => p.type === "CFP") ? "AP" : "CFP";
-  const poll = eligiblePolls.filter(p => p.type === type).sort((a, b) => b.releasedAt.localeCompare(a.releasedAt) || b.id.localeCompare(a.id))[0] ?? null;
+  const poll = associatedPollId ? input.polls.find(p => p.id === associatedPollId) ?? null : eligiblePolls.filter(p => p.type === type).sort((a, b) => b.releasedAt.localeCompare(a.releasedAt) || b.id.localeCompare(a.id))[0] ?? null;
+  if (associatedPollId && !poll) throw new Error(`Associated poll ${associatedPollId} was not supplied`);
   const missing = [!input.membershipComplete && "membership", !input.scheduleComplete && "schedule", !input.pollsComplete && "polls", !poll && "associated poll", remaining.some(g => g.scheduledAt <= cutoff) && "unresolved games before cutoff"].filter((v): v is string => typeof v === "string");
   const canonical = JSON.stringify({ ...input, teams: [...input.teams].sort((a, b) => a.id.localeCompare(b.id)), games: [...input.games].sort((a, b) => a.id.localeCompare(b.id)), polls: [...input.polls].sort((a, b) => a.id.localeCompare(b.id)) });
-  return { input, cutoff, games, remaining, poll, pollFallback: input.year >= 2014 && type === "AP", complete: missing.length === 0, missing, inputHash: createHash("sha256").update(canonical).digest("hex"), policyVersion: "colley-fbs-1" };
+  return { input, cutoff, games, remaining, poll, pollFallback: input.year >= 2014 && poll?.type === "AP", complete: missing.length === 0, missing, inputHash: createHash("sha256").update(canonical).digest("hex"), policyVersion: "colley-fbs-1" };
 }

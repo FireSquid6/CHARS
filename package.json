@@ -11,7 +11,7 @@
     "typecheck": "bun --cwd site --bun next typegen && bun run --filter site typecheck && bun run --filter chars-db typecheck && bun run --filter chars-cli typecheck && bun run --filter chars-colley typecheck",
     "test": "bun test",
     "db:pull": "bun run --filter chars-db db:pull",
-    "cli": "bun run --filter chars-cli start"
+    "cli": "bun --cwd cli src/main.ts"
   },
   "trustedDependencies": ["sharp", "unrs-resolver"]
 }
