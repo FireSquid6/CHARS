@@ -1,6 +1,6 @@
 # CHARS
 
-> **Current checkout:** The archive site reads the existing PostgreSQL `cfbdb` database. See [site/README.md](site/README.md) and [packages/chars-db/README.md](packages/chars-db/README.md) for current setup. The SQLite migration, backup, and deployment instructions in the historical design notes below do **not** apply; do not run them against `cfbdb`.
+> **Current checkout:** The archive site and the [read-only CLI](cli/README.md) query the existing PostgreSQL `cfbdb` database. See [site/README.md](site/README.md) and [packages/chars-db/README.md](packages/chars-db/README.md) for current setup. The SQLite migration, backup, and deployment instructions in the historical design notes below do **not** apply; do not run them against `cfbdb`.
 
 Hypothetical college-football playoff site: Next.js App Router, Bun, SQLite, CFBD ingestion, Colley ratings, selection and bracket, with separately scheduled scenario proofs. Synthetic test fixtures are not historical season data. No team logos are used.
 
