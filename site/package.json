@@ -1,30 +1,37 @@
 {
-  "name": "app",
+  "name": "site",
   "version": "0.1.0",
   "private": true,
   "scripts": {
     "dev": "bun --bun next dev",
     "build": "bun --bun next build",
     "start": "bun --bun next start",
-    "lint": "eslint",
-    "typecheck": "tsc --noEmit",
-    "typegen": "next typegen"
+    "lint": "eslint"
   },
   "dependencies": {
+    "chars-db": "workspace:*",
     "next": "16.4.2",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
   "devDependencies": {
-    "@tailwindcss/turbopack": "4.3.3",
-    "@types/bun": "1.3.14",
-    "@types/node": "20.19.43",
-    "@types/react": "19.3.0",
-    "@types/react-dom": "19.3.0",
-    "eslint": "9.39.5",
+    "@tailwindcss/turbopack": "^4",
+    "@types/bun": "latest",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
     "eslint-config-next": "16.4.2",
-    "tailwindcss": "4.3.3",
-    "typescript": "5.9.3"
+    "tailwindcss": "^4",
+    "typescript": "^5"
   },
-  "packageManager": "bun@1.3.14"
+  "packageManager": "bun@1.3.5",
+  "ignoreScripts": [
+    "sharp",
+    "unrs-resolver"
+  ],
+  "trustedDependencies": [
+    "sharp",
+    "unrs-resolver"
+  ]
 }

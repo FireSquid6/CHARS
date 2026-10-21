@@ -1,45 +1,11 @@
-# Site notes
+# CHARS — College Football Archive
 
-For Bun setup, persistent local SQLite, ingestion, backup/restore, and **single-host
-systemd deployment**, see the [root README](../README.md) and [`deploy/` units](../deploy/).
-Next.js and the scheduled workers share one durable SQLite file on the same host. Do
-not deploy this site alone to ephemeral serverless storage or run independent writable
-database replicas.
+Browse FBS seasons, records and regular-season team schedules powered by the `chars-db` SQLite package.
 
-## Published snapshot JSON
+1. Copy `.env.example` to `.env.local` and set `DATABASE_PATH` to the **absolute path** of an existing migrated SQLite database. The local development database is `/home/firesquid/data/cfbdb.sqlite`.
+2. From the repository root, run `bun install` and `bun run --cwd site dev`.
+3. Visit [http://localhost:3000](http://localhost:3000).
 
-`GET /api/seasons/2020/snapshots/2020%3Aselection-final` returns the current published
-revision; append `?revision=1` for a specific published historical revision. The response
-includes coverage and policy, pinned game-revision references, ranking records and
-selection routes, stored head-to-head graph/SCC audit and swaps, and fixed bracket slots
-and matchups. Revisions published before migration 011 have `auditAvailable: false` and
-null graph/claims; the endpoint does not infer their history from corrected live games.
-New revisions pin selected poll timing, source hash, and all original poll entries,
-including ties and ineligible ranks. Pre-012 revisions use only the coverage metadata
-captured at publication, marking poll entries and unrecorded timing unavailable rather
-than rereading a corrected release. It never returns raw ingestion payloads,
-credentials, or a recomputed selection. If migration 012 has not been applied, the endpoint returns a migration-required 503;
-run `bun run db:migrate` with the site and workers stopped after a verified backup.
+The Next.js server **must run under Bun** to support `bun:sqlite` (the `dev`, `build`, and `start` scripts do this automatically). Data is read on each request, so database updates do not require a rebuild. Only regular-season games belong in the database; records include all opponents, while standings and team pages are limited to FBS teams.
 
-## Synthetic browser acceptance
-
-From the repository root, use a **new** path under `/tmp/opencode/` (the fixture refuses
-an existing file), then run the site against only that file:
-
-```bash
-DATABASE_PATH=/tmp/opencode/chars-browser-unique.db bun site/tests/browser-fixture.ts
-cd site
-DATABASE_PATH=/tmp/opencode/chars-browser-unique.db NEXT_DIST_DIR=.next-fixture bun run dev -- --port 3199
-# In another shell, from the repository root:
-SYNTHETIC_BROWSER_URL=http://localhost:3199 bun test site/tests/browser.integration.test.ts
-```
-
-`NEXT_DIST_DIR` keeps the fixture server separate from any existing Next dev server.
-Check `/` → `/seasons/2020`, click Older and a status bubble, use browser Back and the
-week selector, then inspect the final bracket at mobile width and focus the scrollable
-rankings table with Tab. The Bun integration test checks server-rendered HTML and JSON;
-This fixture contains hand-authored rankings and status labels for **UI rendering only**;
-it does not validate the selection engine or mathematically prove scenarios. Functional
-engine and scenario validity is covered by separate algorithm tests. Manual browser
-checks cover actual navigation and viewport. Verify Tab/Enter in a browser
-with keyboard-event support.
+Verify with `bun run --cwd site build`, `bun run --cwd site lint`, and `bun test` from the repository root.

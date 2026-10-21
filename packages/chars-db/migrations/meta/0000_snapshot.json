@@ -1,0 +1,441 @@
+{
+  "version": "6",
+  "dialect": "sqlite",
+  "id": "87e5c56c-12fc-4368-b039-defe925983bd",
+  "prevId": "00000000-0000-0000-0000-000000000000",
+  "tables": {
+    "conferences": {
+      "name": "conferences",
+      "columns": {
+        "conference_id": {
+          "name": "conference_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "abbreviation": {
+          "name": "abbreviation",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "games": {
+      "name": "games",
+      "columns": {
+        "game_id": {
+          "name": "game_id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "home_team": {
+          "name": "home_team",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "away_team": {
+          "name": "away_team",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "year": {
+          "name": "year",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "week": {
+          "name": "week",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "start_date": {
+          "name": "start_date",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "home_score": {
+          "name": "home_score",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "away_score": {
+          "name": "away_score",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "overtimes": {
+          "name": "overtimes",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "games_year_week_idx": {
+          "name": "games_year_week_idx",
+          "columns": [
+            "year",
+            "week"
+          ],
+          "isUnique": false
+        },
+        "games_home_team_year_idx": {
+          "name": "games_home_team_year_idx",
+          "columns": [
+            "home_team",
+            "year"
+          ],
+          "isUnique": false
+        },
+        "games_away_team_year_idx": {
+          "name": "games_away_team_year_idx",
+          "columns": [
+            "away_team",
+            "year"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "games_home_team_teams_team_id_fk": {
+          "name": "games_home_team_teams_team_id_fk",
+          "tableFrom": "games",
+          "tableTo": "teams",
+          "columnsFrom": [
+            "home_team"
+          ],
+          "columnsTo": [
+            "team_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "games_away_team_teams_team_id_fk": {
+          "name": "games_away_team_teams_team_id_fk",
+          "tableFrom": "games",
+          "tableTo": "teams",
+          "columnsFrom": [
+            "away_team"
+          ],
+          "columnsTo": [
+            "team_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "games_different_teams_check": {
+          "name": "games_different_teams_check",
+          "value": "\"games\".\"home_team\" <> \"games\".\"away_team\""
+        },
+        "games_home_score_check": {
+          "name": "games_home_score_check",
+          "value": "\"games\".\"home_score\" >= 0"
+        },
+        "games_away_score_check": {
+          "name": "games_away_score_check",
+          "value": "\"games\".\"away_score\" >= 0"
+        },
+        "games_overtimes_check": {
+          "name": "games_overtimes_check",
+          "value": "\"games\".\"overtimes\" >= 0"
+        }
+      }
+    },
+    "poll_entries": {
+      "name": "poll_entries",
+      "columns": {
+        "release_id": {
+          "name": "release_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "team_id": {
+          "name": "team_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "rank": {
+          "name": "rank",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "poll_entries_release_id_poll_releases_release_id_fk": {
+          "name": "poll_entries_release_id_poll_releases_release_id_fk",
+          "tableFrom": "poll_entries",
+          "tableTo": "poll_releases",
+          "columnsFrom": [
+            "release_id"
+          ],
+          "columnsTo": [
+            "release_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "poll_entries_team_id_teams_team_id_fk": {
+          "name": "poll_entries_team_id_teams_team_id_fk",
+          "tableFrom": "poll_entries",
+          "tableTo": "teams",
+          "columnsFrom": [
+            "team_id"
+          ],
+          "columnsTo": [
+            "team_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "poll_entries_release_id_team_id_pk": {
+          "columns": [
+            "release_id",
+            "team_id"
+          ],
+          "name": "poll_entries_release_id_team_id_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "poll_entries_rank_check": {
+          "name": "poll_entries_rank_check",
+          "value": "\"poll_entries\".\"rank\" > 0"
+        }
+      }
+    },
+    "poll_releases": {
+      "name": "poll_releases",
+      "columns": {
+        "release_id": {
+          "name": "release_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "poll_id": {
+          "name": "poll_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "year": {
+          "name": "year",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "week": {
+          "name": "week",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "released_at": {
+          "name": "released_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "poll_releases_poll_year_week_idx": {
+          "name": "poll_releases_poll_year_week_idx",
+          "columns": [
+            "poll_id",
+            "year",
+            "week"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "seasons": {
+      "name": "seasons",
+      "columns": {
+        "team_id": {
+          "name": "team_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "year": {
+          "name": "year",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "conference_id": {
+          "name": "conference_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "division": {
+          "name": "division",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "classification": {
+          "name": "classification",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "seasons_year_idx": {
+          "name": "seasons_year_idx",
+          "columns": [
+            "year"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "seasons_team_id_teams_team_id_fk": {
+          "name": "seasons_team_id_teams_team_id_fk",
+          "tableFrom": "seasons",
+          "tableTo": "teams",
+          "columnsFrom": [
+            "team_id"
+          ],
+          "columnsTo": [
+            "team_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "seasons_conference_id_conferences_conference_id_fk": {
+          "name": "seasons_conference_id_conferences_conference_id_fk",
+          "tableFrom": "seasons",
+          "tableTo": "conferences",
+          "columnsFrom": [
+            "conference_id"
+          ],
+          "columnsTo": [
+            "conference_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "seasons_team_id_year_pk": {
+          "columns": [
+            "team_id",
+            "year"
+          ],
+          "name": "seasons_team_id_year_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "seasons_classification_check": {
+          "name": "seasons_classification_check",
+          "value": "\"seasons\".\"classification\" IN ('FBS', 'FCS', 'DIV2', 'DIV3')"
+        }
+      }
+    },
+    "teams": {
+      "name": "teams",
+      "columns": {
+        "team_id": {
+          "name": "team_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "team_name": {
+          "name": "team_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "abbreviation": {
+          "name": "abbreviation",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    }
+  },
+  "views": {},
+  "enums": {},
+  "_meta": {
+    "schemas": {},
+    "tables": {},
+    "columns": {}
+  },
+  "internal": {
+    "indexes": {}
+  }
+}
